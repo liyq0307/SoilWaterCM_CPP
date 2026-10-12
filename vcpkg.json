@@ -1,0 +1,45 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "soilwatercm-backend",
+  "version-string": "1.0.0",
+  "description": "SoilWaterCM C++ Backend - High-performance water and soil conservation remote sensing monitoring backend",
+  "dependencies": [
+    {
+      "name": "drogon",
+      "features": ["postgres", "redis"]
+    },
+    "nlohmann-json",
+    "spdlog",
+    "libpq",
+    "libpqxx",
+    "mongo-cxx-driver",
+    "hiredis",
+    "jwt-cpp",
+    "boost",
+    "openssl",
+    "gtest",
+    "benchmark",
+    "yaml-cpp"
+  ],
+  "features": {
+    "opencv": {
+      "description": "OpenCV support for advanced image processing",
+      "dependencies": [
+        {
+          "name": "opencv4",
+          "version>=": "4.8.0"
+        }
+      ]
+    },
+    "eigen": {
+      "description": "Eigen3 support for linear algebra",
+      "dependencies": [
+        {
+          "name": "eigen3",
+          "version>=": "3.4.0"
+        }
+      ]
+    }
+  },
+  "builtin-baseline": "86dc619bd8d9697405ae5c944b474117ea9457ce"
+}
