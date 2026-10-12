@@ -1,0 +1,60 @@
+{
+    "listeners": [
+        {
+            "address": "0.0.0.0",
+            "port": 8080,
+            "https": false
+        }
+    ],
+    "app": {
+        "number_of_threads": 4,
+        "enable_session": false,
+        "session_timeout": 0,
+        "document_root": "static",
+        "home_page": "index.html",
+        "use_implicit_page": true,
+        "implicit_page": "index.html",
+        "static_files_cache_time": 5,
+        "upload_path": "uploads",
+        "file_types": [
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp",
+            ".tif", ".tiff", ".geotiff",
+            ".shp", ".geojson", ".kml", ".kmz",
+            ".doc", ".docx", ".pdf", ".txt",
+            ".zip", ".rar"
+        ],
+        "max_file_size": "2147483648",
+        "log": {
+            "log_path": "logs",
+            "log_level": "INFO",
+            "display_errors": true
+        },
+        "run_as_daemon": false,
+        "relaunch_on_error": false,
+        "use_sendfile": true,
+        "use_gzip": true,
+        "static_files_compressed": true,
+        "client_max_body_size": "100M",
+        "client_max_memory_body_size": "10M",
+        "keepalive_requests": 1000,
+        "read_timeout": 60,
+        "write_timeout": 60
+    },
+    "db_clients": [
+        {
+            "name": "postgres",
+            "rdbms": "postgresql",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "dbname": "soilwatercm",
+            "user": "postgres",
+            "passwd": "",
+            "client_encoding": "utf8",
+            "number_of_connections": 10,
+            "is_fast": true
+        }
+    ],
+    "plugins": []
+}
+
+

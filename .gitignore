@@ -1,0 +1,41 @@
+# Build directories
+build/
+install/
+out/
+
+# IDE and editor
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln.docstates
+
+# Compiled files
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.map
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# vcpkg (auto-downloaded and auto-installed)
+thirdparty/vcpkg/
+thirdparty/vendor/
+vcpkg_installed/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+Thumbs.db

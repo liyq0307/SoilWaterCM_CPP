@@ -1,0 +1,187 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with PostGIS
+  postgres:
+    image: postgis/postgis:14-3.3
+    container_name: soilwatercm-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-soilwatercm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-soilwatercm123}
+      POSTGRES_DB: ${POSTGRES_DB:-soilwatercm}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/postgres:/docker-entrypoint-initdb.d
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - soilwatercm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-soilwatercm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB
+  mongo:
+    image: mongo:5.0
+    container_name: soilwatercm-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-soilwatercm}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-soilwatercm123}
+    volumes:
+      - mongo_data:/data/db
+      - ./init/mongo:/docker-entrypoint-initdb.d
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    networks:
+      - soilwatercm-network
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis
+  redis:
+    image: redis:6.0
+    container_name: soilwatercm-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-soilwatercm123}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - soilwatercm-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-soilwatercm123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # SoilWaterCM Backend
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: soilwatercm-backend:latest
+    container_name: soilwatercm-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Server
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: 8080
+      SERVER_WORKERS: ${SERVER_WORKERS:-4}
+      
+      # PostgreSQL
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-soilwatercm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-soilwatercm123}
+      POSTGRES_DB: ${POSTGRES_DB:-soilwatercm}
+      POSTGRES_POOL_SIZE: ${POSTGRES_POOL_SIZE:-10}
+      
+      # MongoDB
+      MONGO_URI: mongodb://${MONGO_USER:-soilwatercm}:${MONGO_PASSWORD:-soilwatercm123}@mongo:27017/${MONGO_DB:-soilwatercm}?authSource=admin
+      
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-soilwatercm123}
+      
+      # JWT
+      JWT_SECRET: ${JWT_SECRET:-your_jwt_secret_key_change_in_production}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-3600}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FILE: /var/log/soilwatercm/app.log
+      
+      # Storage
+      STORAGE_BASE_PATH: /data
+      STORAGE_IMAGE_PATH: /data/images
+      STORAGE_RESULT_PATH: /data/results
+      STORAGE_REPORT_PATH: /data/reports
+      STORAGE_TEMP_PATH: /data/temp
+      
+      # External Tools
+      GRASS_HOME: ${GRASS_HOME:-/usr/lib/grass82}
+      SAGA_HOME: ${SAGA_HOME:-/usr/lib/saga}
+      OTB_HOME: ${OTB_HOME:-/opt/otb}
+      MINTPY_ENV: ${MINTPY_ENV:-mintpy}
+    volumes:
+      - ./config:/app/config
+      - backend_logs:/var/log/soilwatercm
+      - backend_data:/data
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    networks:
+      - soilwatercm-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # Prometheus (Monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: soilwatercm-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - soilwatercm-network
+    restart: unless-stopped
+
+  # Grafana (Visualization)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: soilwatercm-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - soilwatercm-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  mongo_data:
+    driver: local
+  redis_data:
+    driver: local
+  backend_logs:
+    driver: local
+  backend_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  soilwatercm-network:
+    driver: bridge
