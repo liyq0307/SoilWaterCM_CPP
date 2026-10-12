@@ -1,7 +1,7 @@
 # 水土保持遥感动态监测系统 C++ 后端 (SoilWaterCM-CPP)
 
 > 面向在建矿山的多源遥感水土保持动态监测平台 — C++ 后端服务
-> 基于 [Drogon](https://github.com/drogonframework/drogon) 框架, 功能对齐 [E:\WorkSpace\SoilWaterCM](https://github.com/) 的 Python FastAPI 版
+> 基于 [Drogon](https://github.com/drogonframework/drogon) 框架, 
 > 覆盖项目/期次管理、影像接入、预处理、信息提取、综合评价、异常预警、报告生成、InSAR 形变、三维图层全流程
 
 ---
@@ -26,7 +26,7 @@
 
 对于在建矿山, 施工过程中存在大范围土地扰动、弃渣堆置、边坡开挖等行为, 水土流失风险突出。传统水保监测以人工巡查为主, 周期长、覆盖面有限, 难以满足动态监管要求。
 
-本仓库是监测平台的 **C++ 后端实现**, 与 Python 版后端 (FastAPI) 保持业务对齐: 相同的 REST API 形态、相同的数据模型, 面向对服务性能和部署体积有更高要求的场景。
+本仓库是监测平台的 **C++ 后端实现**, 面向对服务性能和部署体积有更高要求的场景。
 
 ### 核心能力
 
@@ -154,7 +154,7 @@ CREATE DATABASE soilwatercm;
 CREATE EXTENSION postgis;
 ```
 
-本仓库不含迁移脚本, 表结构需自行初始化 (可参照 Python 版 Alembic 生成的表, 详见 [9. 数据库设计](#9-数据库设计))。
+本仓库不含迁移脚本, 表结构需自行初始化 (详见 [9. 数据库设计](#9-数据库设计) 的表清单)。
 `zone_stats`、`zone_boundaries`、`indicators`、`indicator_values`、`ground_truths`、`basemap_images`、`project_documents` 等新模块表需手动建。
 
 ### 5.3 配置
@@ -347,7 +347,7 @@ GRASS / SAGA / OTB / SNAP / ISCE2 / MintPy / PyAPS3 各有独立接口类, `Exte
 | zone_stats | 分区统计 (设计指标 vs 实际扰动/措施) | - |
 | zone_boundaries | 分区边界 (代码/中文名/面积) | geom |
 
-> 枚举列存 int (C++ `enum class`), 与 Python 版的字符串枚举 schema 不同, 不建议混用同一套表。
+> 枚举列存 int (C++ `enum class`)。
 
 ## 10. 测试
 
@@ -361,9 +361,9 @@ ctest -C RelWithDebInfo --output-on-failure
 
 ## 11. 已知限制
 
-与 Python 版对齐过程中, 以下能力为占位/桩实现, 端点可用但不产出真实结果:
+以下能力为占位/桩实现, 端点可用但不产出真实结果:
 
-- **AI 训练/推理类**: FLAIR 微调、变化检测模型、开放词汇提取、UNet 分割训练等为任务占位, 未移植 Python 运行时。
+- **AI 训练/推理类**: FLAIR 微调、变化检测模型、开放词汇提取、UNet 分割训练等为任务占位。
 - **图像渲染类**: PNG/GIF/MP4 专题图、动态变化动画未移植, 相关端点返回数据或占位任务。
 - **卫星客户端**: Sentinel/Landsat/CRESDA 检索下载为桩实现。
 - **部分 InSAR / 地形分析**: GRID 差值、流域提取等算法为任务占位。
@@ -380,6 +380,5 @@ ctest -C RelWithDebInfo --output-on-failure
 | [docs/deployment.md](docs/deployment.md) | 部署指南 |
 | [docs/user_manual.md](docs/user_manual.md) | 使用手册 |
 | [CLAUDE.md](CLAUDE.md) | 代码协作规则 (注释/提交规范) |
-| `E:\WorkSpace\SoilWaterCM` | Python FastAPI 版后端 (功能参照与数据库表结构来源) |
 
 实施依据: SL/T 277-2024《水土保持监测技术规范》
