@@ -58,6 +58,16 @@ namespace soilwatercm::dao
         std::vector<models::Image> findByQualityStatus(models::QualityStatus status);
 
         /**
+         * @brief 取项目最近 N 期 SAR 影像 (按采集时间倒序)
+         *
+         * 供 InSAR 选主/从影像: 取 2 期时较老为主影像, 较新为从影像。
+         * @param projectId 项目 id
+         * @param limit 返回条数上限
+         * @return 按采集时间倒序的 SAR 影像列表
+         */
+        std::vector<models::Image> findLatestSar(int projectId, int limit = 2);
+
+        /**
          * @brief 分页列出所有影像
          * @param page 页码, 从 1 开始
          * @param pageSize 每页条数

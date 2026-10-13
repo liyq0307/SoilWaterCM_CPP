@@ -136,7 +136,7 @@ namespace soilwatercm::services
         return cutVolume - fillVolume;
     }
 
-    std::string ThreeDService::analyzeInundation(const InundationParams& params)
+    std::string ThreeDService::analyzeInundation(const InundationParams& params, InundationStats* stats)
     {
         auto dem = gdal_->readRaster(params.dem_path);
 
@@ -146,6 +146,10 @@ namespace soilwatercm::services
         double totalArea = 0.0;
         double inundatedArea = 0.0;
         double cellArea = std::abs(dem.geotransform[1]) * std::abs(dem.geotransform[5]);
+
+        double depthSum = 0.0;
+        double depthMax = 0.0;
+        int floodCount = 0;
 
         for (size_t i = 0; i < dem.data.size(); ++i)
         {
@@ -158,8 +162,12 @@ namespace soilwatercm::services
             if (dem.data[i] < params.water_level)
             {
                 inundationData[i] = 1.0;
-                depthData[i] = params.water_level - dem.data[i];
+                double d = params.water_level - dem.data[i];
+                depthData[i] = d;
                 inundatedArea += cellArea;
+                depthSum += d;
+                depthMax = std::max(depthMax, d);
+                ++floodCount;
             }
             else
             {
@@ -201,13 +209,23 @@ namespace soilwatercm::services
 
         gdal_->writeRaster(depthPath, depthOutput);
 
+        if (stats)
+        {
+            stats->total_area_m2 = totalArea;
+            stats->inundated_area_m2 = inundatedArea;
+            stats->depth_mean_m = floodCount > 0 ? depthSum / floodCount : 0.0;
+            stats->depth_max_m = depthMax;
+            stats->mask_path = outputPath;
+            stats->depth_path = depthPath;
+        }
+
         utils::Logger::info("Inundation analysis completed: total={}, inundated={}, ratio={}", totalArea, inundatedArea,
                             totalArea > 0 ? inundatedArea / totalArea : 0.0);
 
         return outputPath;
     }
 
-    std::string ThreeDService::analyzeViewshed(const ViewshedParams& params)
+    std::string ThreeDService::analyzeViewshed(const ViewshedParams& params, ViewshedStats* stats)
     {
         auto dem = gdal_->readRaster(params.dem_path);
 
@@ -292,13 +310,19 @@ namespace soilwatercm::services
         int startCol = std::max(0, obsCol - radius);
         int endCol = std::min(dem.width - 1, obsCol + radius);
 
+        double cellArea = std::abs(dem.geotransform[1]) * std::abs(dem.geotransform[5]);
+        double totalArea = 0.0;
+        double visibleArea = 0.0;
+
         for (int row = startRow; row <= endRow; ++row)
         {
             for (int col = startCol; col <= endCol; ++col)
             {
+                totalArea += cellArea;
                 if (isVisible(row, col))
                 {
                     viewshedData[row * dem.width + col] = 1.0;
+                    visibleArea += cellArea;
                 }
             }
         }
@@ -319,6 +343,14 @@ namespace soilwatercm::services
         outputData.bands = 1;
 
         gdal_->writeRaster(outputPath, outputData);
+
+        if (stats)
+        {
+            stats->total_area_m2 = totalArea;
+            stats->visible_area_m2 = visibleArea;
+            stats->visible_ratio = totalArea > 0 ? visibleArea / totalArea : 0.0;
+            stats->mask_path = outputPath;
+        }
 
         utils::Logger::info("Viewshed analysis completed: output={}", outputPath);
 

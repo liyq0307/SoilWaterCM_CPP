@@ -1,6 +1,8 @@
 #include "scene_layer_service.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <ctime>
 
 #include "../utils/geojson_utils.h"
 
@@ -102,6 +104,21 @@ namespace soilwatercm::services
         {
             return utils::GeoJsonUtils::wktToGeoJson(geom.wkt);
         }
+
+        // 时间戳 -> ISO8601 (UTC), 对齐 created_at 输出
+        std::string isoTime(std::chrono::system_clock::time_point tp)
+        {
+            auto time = std::chrono::system_clock::to_time_t(tp);
+            std::tm tm = {};
+#if defined(_WIN32)
+            gmtime_s(&tm, &time);
+#else
+            gmtime_r(&time, &tm);
+#endif
+            char buf[32];
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+            return buf;
+        }
     }  // namespace
 
     SceneLayerService::SceneLayerService(std::shared_ptr<dao::DisturbanceDao> disturbanceDao,
@@ -109,10 +126,14 @@ namespace soilwatercm::services
                                          std::shared_ptr<dao::AnomalyDao> anomalyDao,
                                          std::shared_ptr<dao::MonitoringPeriodDao> periodDao,
                                          std::shared_ptr<dao::VegetationCoverageDao> fvcDao,
-                                         std::shared_ptr<dao::ErosionResultDao> erosionDao)
+                                         std::shared_ptr<dao::ErosionResultDao> erosionDao,
+                                         std::shared_ptr<dao::TerrainResultDao> terrainDao,
+                                         std::shared_ptr<dao::SpoilDumpDao> spoilDao,
+                                         std::shared_ptr<infrastructure::gdal::VectorProcessor> vectorProcessor)
         : disturbanceDao_(std::move(disturbanceDao)), measureDao_(std::move(measureDao)),
           anomalyDao_(std::move(anomalyDao)), periodDao_(std::move(periodDao)), fvcDao_(std::move(fvcDao)),
-          erosionDao_(std::move(erosionDao))
+          erosionDao_(std::move(erosionDao)), terrainDao_(std::move(terrainDao)), spoilDao_(std::move(spoilDao)),
+          vectorProcessor_(std::move(vectorProcessor))
     {
     }
 
@@ -275,28 +296,163 @@ namespace soilwatercm::services
         return utils::GeoJsonUtils::makeFeatureCollection(features);
     }
 
-    nlohmann::json SceneLayerService::spoilDumps(int /*projectId*/, std::optional<int> /*periodId*/)
+    nlohmann::json SceneLayerService::spoilDumps(int projectId, std::optional<int> periodId)
     {
-        // 本项目无 spoil_dumps 表/DAO, 暂返回空 FeatureCollection
-        return emptyFeatureCollection();
+        if (!spoilDao_)
+            return emptyFeatureCollection();
+
+        auto rows = spoilDao_->findByProject(projectId, periodId, "", "");
+
+        nlohmann::json features = nlohmann::json::array();
+        for (const auto& s : rows)
+        {
+            nlohmann::json geom = geometryOf(s.geom);
+            if (geom.is_null())
+                continue;
+            nlohmann::json props;
+            props["id"] = s.id;
+            props["area_m2"] = s.area_m2;
+            props["stability_level"] = s.stability_level;
+            props["compliance"] = s.compliance;
+            props["detect_method"] = s.detect_method;
+            if (s.volume_m3)
+                props["volume_m3"] = *s.volume_m3;
+            else
+                props["volume_m3"] = nullptr;
+            if (s.max_height_m)
+                props["max_height_m"] = *s.max_height_m;
+            if (s.confidence)
+                props["confidence"] = *s.confidence;
+            props["period_id"] = s.period_id;
+            features.push_back(utils::GeoJsonUtils::makeFeature(geom, props));
+        }
+        return utils::GeoJsonUtils::makeFeatureCollection(features);
     }
 
-    nlohmann::json SceneLayerService::insarResults(int /*projectId*/)
+    nlohmann::json SceneLayerService::insarResults(int projectId)
     {
-        // 本项目无 terrain_results 表/DAO (InSAR 成果未入库), 暂返回空 FeatureCollection
-        return emptyFeatureCollection();
+        // 对齐 Python: 列出 InSAR 形变成果 (terrain_results analysis=insar), 过滤文件已丢失记录
+        nlohmann::json out = nlohmann::json::array();
+        if (!terrainDao_)
+            return out;
+
+        auto rows = terrainDao_->listByProject(projectId, "insar");
+        for (const auto& r : rows)
+        {
+            if (r.raster_path.empty() || !std::filesystem::exists(r.raster_path))
+                continue;
+            nlohmann::json j;
+            j["id"] = r.id;
+            j["raster_path"] = r.raster_path;
+            if (!r.stats_json.empty())
+            {
+                auto stats = nlohmann::json::parse(r.stats_json, nullptr, false);
+                if (!stats.is_discarded())
+                    j["stats"] = std::move(stats);
+            }
+            j["created_at"] = isoTime(r.created_at);
+            out.push_back(j);
+        }
+        return out;
     }
 
-    nlohmann::json SceneLayerService::inundationGeoJson(int /*projectId*/, std::optional<int> /*resultId*/)
+    nlohmann::json SceneLayerService::inundationGeoJson(int projectId, std::optional<int> resultId)
     {
-        // 本项目无淹没分析成果表 (Python 依赖 terrain_results + rasterio 矢量化), 暂返回空
-        return emptyFeatureCollection();
+        if (!terrainDao_ || !vectorProcessor_)
+            return emptyFeatureCollection();
+
+        models::TerrainResult row;
+        bool found = false;
+        if (resultId.has_value())
+        {
+            auto opt = terrainDao_->findById(*resultId);
+            if (opt)
+            {
+                row = *opt;
+                found = true;
+            }
+        }
+        else
+        {
+            auto opt = terrainDao_->latestByProjectAndAnalysis(projectId, "inundation");
+            if (opt)
+            {
+                row = *opt;
+                found = true;
+            }
+        }
+        if (!found || row.raster_path.empty() || !std::filesystem::exists(row.raster_path))
+            return emptyFeatureCollection();
+
+        nlohmann::json stats;
+        if (!row.stats_json.empty())
+            stats = nlohmann::json::parse(row.stats_json, nullptr, false);
+        if (stats.is_discarded())
+            stats = nlohmann::json::object();
+
+        nlohmann::json features = nlohmann::json::array();
+        for (const auto& geom : vectorProcessor_->rasterToVector(row.raster_path))
+        {
+            nlohmann::json gj = geometryOf(geom);
+            if (gj.is_null())
+                continue;
+            nlohmann::json props;
+            props["area_m2"] = stats.value("inundated_area_m2", nlohmann::json());
+            if (stats.contains("depth_mean_m"))
+                props["depth_mean_m"] = stats["depth_mean_m"];
+            if (stats.contains("depth_max_m"))
+                props["depth_max_m"] = stats["depth_max_m"];
+            features.push_back(utils::GeoJsonUtils::makeFeature(gj, props));
+        }
+        return utils::GeoJsonUtils::makeFeatureCollection(features);
     }
 
-    nlohmann::json SceneLayerService::viewshedGeoJson(int /*projectId*/, std::optional<int> /*resultId*/)
+    nlohmann::json SceneLayerService::viewshedGeoJson(int projectId, std::optional<int> resultId)
     {
-        // 本项目无视域分析成果表, 暂返回空
-        return emptyFeatureCollection();
+        if (!terrainDao_ || !vectorProcessor_)
+            return emptyFeatureCollection();
+
+        models::TerrainResult row;
+        bool found = false;
+        if (resultId.has_value())
+        {
+            auto opt = terrainDao_->findById(*resultId);
+            if (opt)
+            {
+                row = *opt;
+                found = true;
+            }
+        }
+        else
+        {
+            auto opt = terrainDao_->latestByProjectAndAnalysis(projectId, "viewshed");
+            if (opt)
+            {
+                row = *opt;
+                found = true;
+            }
+        }
+        if (!found || row.raster_path.empty() || !std::filesystem::exists(row.raster_path))
+            return emptyFeatureCollection();
+
+        nlohmann::json stats;
+        if (!row.stats_json.empty())
+            stats = nlohmann::json::parse(row.stats_json, nullptr, false);
+        if (stats.is_discarded())
+            stats = nlohmann::json::object();
+
+        nlohmann::json features = nlohmann::json::array();
+        for (const auto& geom : vectorProcessor_->rasterToVector(row.raster_path))
+        {
+            nlohmann::json gj = geometryOf(geom);
+            if (gj.is_null())
+                continue;
+            nlohmann::json props;
+            props["visible_area_m2"] = stats.value("visible_area_m2", nlohmann::json());
+            props["visible_ratio"] = stats.value("visible_ratio", nlohmann::json());
+            features.push_back(utils::GeoJsonUtils::makeFeature(gj, props));
+        }
+        return utils::GeoJsonUtils::makeFeatureCollection(features);
     }
 
     nlohmann::json SceneLayerService::availability(int projectId, std::optional<int> periodId)
@@ -305,11 +461,13 @@ namespace soilwatercm::services
         rs["fvc"] = false;
         rs["coverage"] = false;   // 无对应表
         rs["erosion"] = false;
-        rs["landuse"] = false;    // 无对应表
-        rs["insar"] = 0;          // 无 terrain_results 表
+        rs["landuse"] = false;    // 无对应表 (C++ 未注入 landuse DAO)
+        int insarCount = 0;
+        int inundationCount = 0;
 
         int disturbanceCount = 0;
         int measureCount = 0;
+        int spoilCount = 0;
 
         if (periodId.has_value())
         {
@@ -319,6 +477,8 @@ namespace soilwatercm::services
                 measureCount = static_cast<int>(measureDao_->findByPeriodId(*periodId).size());
                 rs["fvc"] = fvcDao_->findByPeriodId(*periodId).has_value();
                 rs["erosion"] = erosionDao_->findByPeriodId(*periodId).has_value();
+                if (spoilDao_)
+                    spoilCount = static_cast<int>(spoilDao_->findByProject(projectId, periodId).size());
             }
         }
         else
@@ -328,17 +488,26 @@ namespace soilwatercm::services
                 disturbanceCount += static_cast<int>(disturbanceDao_->findByPeriodId(pid).size());
                 measureCount += static_cast<int>(measureDao_->findByPeriodId(pid).size());
             }
+            if (spoilDao_)
+                spoilCount = static_cast<int>(spoilDao_->findByProject(projectId, periodId).size());
         }
+
+        if (terrainDao_)
+        {
+            insarCount = static_cast<int>(terrainDao_->listByProject(projectId, "insar").size());
+            inundationCount = static_cast<int>(terrainDao_->listByProject(projectId, "inundation").size());
+        }
+        rs["insar"] = insarCount;
 
         nlohmann::json vector;
         vector["disturbance"] = disturbanceCount;
         vector["measure"] = measureCount;
-        vector["spoil_dump"] = 0; // 无 spoil_dumps 表
+        vector["spoil_dump"] = spoilCount;
 
         nlohmann::json out;
         out["rs"] = rs;
         out["vector"] = vector;
-        out["inundation"] = 0; // 无淹没成果表
+        out["inundation"] = inundationCount;
         return out;
     }
 

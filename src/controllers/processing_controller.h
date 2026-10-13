@@ -5,7 +5,13 @@
 #include <drogon/HttpController.h>
 
 #include "../dao/image_dao.h"
+#include "../dao/result_dao.h"
+#include "../dao/spoil_dump_dao.h"
 #include "../dao/task_dao.h"
+#include "../dao/terrain_result_dao.h"
+#include "../dao/trained_model_dao.h"
+#include "../services/anomaly_service.h"
+#include "../services/insar_service.h"
 #include "../services/preprocess_service.h"
 #include "../services/three_d_service.h"
 
@@ -23,10 +29,12 @@ namespace soilwatercm::controllers
         ProcessingController() = default;
 
         /**
-         * @brief 构造, 注入预处理服务
+         * @brief 构造, 注入预处理服务与 InSAR 处理链
          * @param preprocessService 影像预处理服务
+         * @param insarService InSAR 处理服务 (可为空, 为空则 insar 端点降级为占位)
          */
-        explicit ProcessingController(std::shared_ptr<services::PreprocessService> preprocessService);
+        explicit ProcessingController(std::shared_ptr<services::PreprocessService> preprocessService,
+                                      std::shared_ptr<services::InsarService> insarService = nullptr);
 
         METHOD_LIST_BEGIN
         ADD_METHOD_TO(ProcessingController::preprocess, "/api/v1/processing/preprocess", drogon::Post);
@@ -85,7 +93,7 @@ namespace soilwatercm::controllers
         /**
          * @brief POST /api/v1/processing/insar/{project_id} InSAR 形变监测任务
          * @param projectId 项目 id
-         * @return 通过 callback 返回任务信息; 后端依赖未注入, 任务登记后置失败
+         * @return 通过 callback 返回任务信息; 取该项目最近 2 期 SAR 影像走 D-InSAR 真实算法链
          */
         void insar(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback,
                    int projectId);
@@ -184,23 +192,37 @@ namespace soilwatercm::controllers
 
         /**
          * @brief GET /api/v1/processing/terrain/results 地形分析成果列表
-         * @return 通过 callback 返回成果列表; 成果未实现, 当前恒为空数组
+         * @return 通过 callback 返回 terrain_results 表中该项目 (且文件未丢失) 的成果列表
          */
         void terrainResults(const drogon::HttpRequestPtr& req,
                             std::function<void(const drogon::HttpResponsePtr&)>&& callback);
 
     private:
         std::shared_ptr<services::PreprocessService> preprocessService_;
+        std::shared_ptr<services::InsarService> insarService_;
 
         // 启动时未注入的依赖, 按全局配置惰性构建
         std::shared_ptr<repository::PostgresRepository> sharedRepo();
         std::shared_ptr<dao::TaskDao> taskDao();
         std::shared_ptr<dao::ImageDao> imageDao();
         std::shared_ptr<services::ThreeDService> threeDService();
+        std::shared_ptr<dao::TerrainResultDao> terrainResultDao();
+        std::shared_ptr<dao::LandUseResultDao> landuseResultDao();
+        std::shared_ptr<dao::SegmentationResultDao> segmentationResultDao();
+        std::shared_ptr<dao::SpoilDumpDao> spoilDumpDao();
+        std::shared_ptr<dao::TrainedModelDao> trainedModelDao();
+        std::shared_ptr<services::AnomalyService> anomalyService();
+
         std::shared_ptr<repository::PostgresRepository> repo_;
         std::shared_ptr<dao::TaskDao> taskDao_;
         std::shared_ptr<dao::ImageDao> imageDao_;
         std::shared_ptr<services::ThreeDService> threeDService_;
+        std::shared_ptr<dao::TerrainResultDao> terrainResultDao_;
+        std::shared_ptr<dao::LandUseResultDao> landuseResultDao_;
+        std::shared_ptr<dao::SegmentationResultDao> segmentationResultDao_;
+        std::shared_ptr<dao::SpoilDumpDao> spoilDumpDao_;
+        std::shared_ptr<dao::TrainedModelDao> trainedModelDao_;
+        std::shared_ptr<services::AnomalyService> anomalyService_;
 
         /// @brief 建 pending 任务记录; params.task_type 区分 TaskType 枚举覆盖不到的业务类型
         models::Task createTaskRecord(models::TaskType type, int projectId, int periodId, const Json::Value& taskParams,
@@ -212,12 +234,12 @@ namespace soilwatercm::controllers
         /// @brief 后台占位执行体: 写占位结果并回写任务状态
         void runPlaceholderTask(int taskId, std::string outputDir, std::string taskType);
 
-        /// @brief 后台执行: 按水位淹没分析 (基于项目 DEM)
-        void runInundationTask(int taskId, std::string demPath, double waterLevel);
+        /// @brief 后台执行: 按水位淹没分析 (基于项目 DEM), 成功后落 terrain_results
+        void runInundationTask(int taskId, int projectId, std::string demPath, double waterLevel);
 
-        /// @brief 后台执行: 视点通视分析 (基于项目 DEM)
-        void runViewshedTask(int taskId, std::string demPath, double obsLon, double obsLat, double obsHeight,
-                             double radiusM);
+        /// @brief 后台执行: 视点通视分析 (基于项目 DEM), 成功后落 terrain_results
+        void runViewshedTask(int taskId, int projectId, std::string demPath, double obsLon, double obsLat,
+                             double obsHeight, double radiusM);
 
         /// @brief 取参数: JSON body 优先, 其次 query
         static Json::Value param(const drogon::HttpRequestPtr& req, const std::string& key);

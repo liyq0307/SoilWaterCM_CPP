@@ -9,22 +9,84 @@
 namespace soilwatercm::services
 {
 
-    AnomalyService::AnomalyService(std::shared_ptr<dao::AnomalyDao> anomalyDao) : anomalyDao_(std::move(anomalyDao)) {}
+    AnomalyService::AnomalyService(std::shared_ptr<dao::AnomalyDao> anomalyDao,
+                                   std::shared_ptr<dao::DisturbanceDao> disturbanceDao,
+                                   std::shared_ptr<dao::TerrainResultDao> terrainDao,
+                                   std::shared_ptr<dao::ErosionResultDao> erosionDao)
+        : anomalyDao_(std::move(anomalyDao)), disturbanceDao_(std::move(disturbanceDao)),
+          terrainDao_(std::move(terrainDao)), erosionDao_(std::move(erosionDao))
+    {
+    }
 
     std::vector<models::Anomaly> AnomalyService::detectAnomalies(const AnomalyDetectParams& params)
     {
-        std::vector<models::Anomaly> anomalies;
-
-        if (params.type == "disturbance")
+        // 违规扰动检测: 取该期次扰动图斑, 挑出违规 (Illegal) 生成异常
+        if (params.type == "disturbance" || params.type.empty())
         {
-            anomalies = anomalyDao_->findByProjectId(params.project_id);
-        }
-        else if (params.type == "deformation")
-        {
-            anomalies = anomalyDao_->findByProjectId(params.project_id);
+            if (!disturbanceDao_)
+            {
+                utils::Logger::warn("Anomaly detect: disturbanceDao 未注入, 跳过违规扰动检测");
+                return {};
+            }
+            std::vector<models::Disturbance> disturbances =
+                disturbanceDao_->findByProject(params.project_id,
+                                                params.period_id > 0 ? std::optional<int>(params.period_id) : std::nullopt);
+            return detectDisturbanceViolation(params.project_id, params.period_id, disturbances);
         }
 
-        return anomalies;
+        // InSAR 形变检测: 取该项目最新 InSAR 形变栅格
+        if (params.type == "deformation" || params.type == "insar")
+        {
+            if (!terrainDao_)
+            {
+                utils::Logger::warn("Anomaly detect: terrainDao 未注入, 跳过 InSAR 形变检测");
+                return {};
+            }
+            auto latest = terrainDao_->latestByProjectAndAnalysis(params.project_id, "insar");
+            if (!latest || latest->raster_path.empty())
+            {
+                utils::Logger::warn("Anomaly detect: 无 InSAR 形变成果, 无法做形变异常检测");
+                return {};
+            }
+            return detectInsarDeformation(params.project_id, params.period_id, latest->raster_path);
+        }
+
+        // 剧烈侵蚀检测: 取该期次侵蚀成果, 强烈及以上面积超阈值则生成一条异常
+        if (params.type == "erosion")
+        {
+            if (!erosionDao_)
+            {
+                utils::Logger::warn("Anomaly detect: erosionDao 未注入, 跳过剧烈侵蚀检测");
+                return {};
+            }
+            std::vector<models::Anomaly> anomalies;
+            auto erosionOpt = erosionDao_->findByPeriodId(params.period_id);
+            if (erosionOpt)
+            {
+                const auto& er = *erosionOpt;
+                // 强烈+极强烈+剧烈面积合计, 超 1000 m² 视为存在剧烈侵蚀异常
+                double severeTotal = er.strong_area + er.very_strong_area + er.severe_area;
+                if (severeTotal > 1000.0)
+                {
+                    models::Anomaly anomaly;
+                    anomaly.type = models::AnomalyType::ErosionGully;
+                    anomaly.project_id = params.project_id;
+                    anomaly.period_id = params.period_id;
+                    anomaly.severity = er.severe_area > 0 ? models::Severity::High : models::Severity::Medium;
+                    anomaly.status = models::DisposalStatus::Pending;
+                    anomaly.detected_at = std::chrono::system_clock::now();
+                    anomaly.description = "剧烈侵蚀: 强烈及以上侵蚀面积 " + std::to_string(severeTotal) + " m², "
+                                           + "平均侵蚀模数 " + std::to_string(er.mean_modulus) + " t/(ha·a)";
+                    int id = anomalyDao_->insert(anomaly);
+                    anomaly.id = id;
+                    anomalies.push_back(anomaly);
+                }
+            }
+            return anomalies;
+        }
+
+        utils::Logger::warn("Anomaly detect: 未知类型 '{}'", params.type);
+        return {};
     }
 
     std::vector<models::Anomaly> AnomalyService::detectDisturbanceViolation(

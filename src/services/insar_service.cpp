@@ -28,18 +28,36 @@ namespace soilwatercm::services
 
     std::future<InsarProcessResult> InsarService::submitInsarTask(const InsarProcessParams& params)
     {
-        return std::async(std::launch::async,
-                          [this, params]()
+        models::Task task;
+        task.type = models::TaskType::Insar;
+        task.status = models::TaskStatus::Pending;
+        task.submitted_at = std::chrono::system_clock::now();
+        task.project_id = params.project_id;
+        task.period_id = params.period_id;
+
+        int taskId = taskDao_->insert(task);
+
+        return std::async(std::launch::async, [this, params, taskId]()
                           {
-                              models::Task task;
-                              task.type = models::TaskType::Insar;
-                              task.status = models::TaskStatus::Pending;
-                              task.submitted_at = std::chrono::system_clock::now();
-                              task.project_id = params.project_id;
-                              task.period_id = params.period_id;
+                              if (params.process_type == "dinsar")
+                              {
+                                  return this->executeDInsar(params, taskId);
+                              }
+                              else
+                              {
+                                  return this->executeSbas(params, taskId);
+                              }
+                          });
+    }
 
-                              int taskId = taskDao_->insert(task);
-
+    std::future<InsarProcessResult> InsarService::submitInsarTask(const InsarProcessParams& params, int taskId)
+    {
+        if (taskId > 0)
+        {
+            updateTaskProgress(taskId, 0, "任务已登记");
+        }
+        return std::async(std::launch::async, [this, params, taskId]()
+                          {
                               if (params.process_type == "dinsar")
                               {
                                   return this->executeDInsar(params, taskId);

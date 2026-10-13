@@ -1,10 +1,13 @@
 #include "report_service.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 #include "../common/exceptions.h"
 #include "../utils/logger.h"
@@ -42,6 +45,181 @@ namespace soilwatercm::services
                 default:
                     return "报告";
             }
+        }
+
+        // PDF 内容流文本转义: 去非 ASCII 字节 (避免中文字体缺失) 并转义 \ ( )
+        std::string escapePdfAscii(const std::string& s)
+        {
+            std::string out;
+            for (unsigned char c : s)
+            {
+                if (c == '\\')
+                    out += "\\\\";
+                else if (c == '(')
+                    out += "\\(";
+                else if (c == ')')
+                    out += "\\)";
+                else if (c >= 0x20 && c < 0x7F)
+                    out += static_cast<char>(c);
+            }
+            return out;
+        }
+
+        // 由 PDF 文件名 stem 提取 ASCII 标题 (剔除非 ASCII), 空则返回空串
+        std::string paramsTitleToAscii(const std::string& pdfPath)
+        {
+            std::string stem = std::filesystem::path(pdfPath).stem().string();
+            std::string out;
+            for (unsigned char c : stem)
+                if (c >= 0x20 && c < 0x7F)
+                    out += static_cast<char>(c);
+            return out;
+        }
+
+        // ---- 最小 ZIP (stored, 不压缩) 写入器: 生成可被 Word 打开的真 DOCX ----
+
+        // CRC32 (IEEE 802.3, 与 ZIP 规范一致), 查表法
+        struct Crc32
+        {
+            static const uint32_t* table()
+            {
+                static uint32_t tbl[256] = {};
+                static bool init = []
+                {
+                    for (uint32_t i = 0; i < 256; ++i)
+                    {
+                        uint32_t c = i;
+                        for (int k = 0; k < 8; ++k)
+                            c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+                        tbl[i] = c;
+                    }
+                    return true;
+                }();
+                (void)init;
+                return tbl;
+            }
+            static uint32_t of(const std::string& data)
+            {
+                const auto* t = table();
+                uint32_t c = 0xFFFFFFFFu;
+                for (unsigned char ch : data)
+                    c = t[(c ^ ch) & 0xFF] ^ (c >> 8);
+                return c ^ 0xFFFFFFFFu;
+            }
+        };
+
+        struct ZipEntry
+        {
+            std::string name;
+            std::string data;
+        };
+
+        // 追加小端 uint16/uint32 到输出流
+        void putU16(std::ostream& out, uint16_t v)
+        {
+            char b[2] = {static_cast<char>(v & 0xFF), static_cast<char>((v >> 8) & 0xFF)};
+            out.write(b, 2);
+        }
+        void putU32(std::ostream& out, uint32_t v)
+        {
+            char b[4] = {static_cast<char>(v & 0xFF), static_cast<char>((v >> 8) & 0xFF),
+                         static_cast<char>((v >> 16) & 0xFF), static_cast<char>((v >> 24) & 0xFF)};
+            out.write(b, 4);
+        }
+
+        // 写入 stored (无压缩) ZIP 文件; 每个 entry 保留原大小/方法 0
+        void writeStoredZip(const std::string& path, const std::vector<ZipEntry>& entries)
+        {
+            std::ostringstream local;
+            std::ostringstream central;
+            uint32_t offset = 0;
+
+            for (const auto& e : entries)
+            {
+                uint32_t crc = Crc32::of(e.data);
+                uint16_t nameLen = static_cast<uint16_t>(e.name.size());
+                uint32_t dataSize = static_cast<uint32_t>(e.data.size());
+
+                // 本地文件头 (30 字节 + 文件名 + 数据)
+                local << char(0x50) << char(0x4B) << char(0x03) << char(0x04); // 签名 PK\x03\x04
+                putU16(local, 20);     // 解压所需版本
+                putU16(local, 0);       // 通用标志
+                putU16(local, 0);       // 方法 0 = stored
+                putU16(local, 0);       // mod time
+                putU16(local, 0x21);    // mod date (1980-01-01, 非 0 以避免部分解析器告警)
+                putU32(local, crc);
+                putU32(local, dataSize); // 压缩后 (stored 相同)
+                putU32(local, dataSize); // 未压缩
+                putU16(local, nameLen);
+                putU16(local, 0);         // 额外字段长度
+                local.write(e.name.data(), static_cast<std::streamsize>(nameLen));
+                local.write(e.data.data(), static_cast<std::streamsize>(dataSize));
+
+                // 中央目录记录 (46 字节 + 文件名)
+                uint32_t centralOffset = offset;
+                central << char(0x50) << char(0x4B) << char(0x01) << char(0x02); // 签名 PK\x01\x02
+                putU16(central, 20); // 创建版本
+                putU16(central, 20);  // 解压所需版本
+                putU16(central, 0);  // 标志
+                putU16(central, 0);  // 方法
+                putU16(central, 0);  // time
+                putU16(central, 0x21);
+                putU32(central, crc);
+                putU32(central, dataSize);
+                putU32(central, dataSize);
+                putU16(central, nameLen);
+                putU16(central, 0); // 额外
+                putU16(central, 0); // 注释
+                putU16(central, 0); // disk
+                putU16(central, 0); // 内部属性
+                putU32(central, 0); // 外部属性
+                putU32(central, centralOffset);
+                central.write(e.name.data(), static_cast<std::streamsize>(nameLen));
+
+                offset += 30 + nameLen + dataSize;
+            }
+
+            std::string localStr = local.str();
+            std::string centralStr = central.str();
+            uint32_t cdSize = static_cast<uint32_t>(centralStr.size());
+            uint32_t cdOffset = static_cast<uint32_t>(localStr.size());
+
+            std::ofstream ofs(path, std::ios::binary);
+            ofs << localStr;
+            ofs << centralStr;
+            // 中央目录结束记录 (22 字节)
+            ofs << char(0x50) << char(0x4B) << char(0x05) << char(0x06);
+            putU16(ofs, 0); // disk
+            putU16(ofs, 0); // cd 所在 disk
+            putU16(ofs, static_cast<uint16_t>(entries.size()));
+            putU16(ofs, static_cast<uint16_t>(entries.size()));
+            putU32(ofs, cdSize);
+            putU32(ofs, cdOffset);
+            putU16(ofs, 0); // 注释长度
+        }
+
+        // 由 document.xml 组装完整 DOCX (含 Content_Types / 关系 / 正文)
+        std::vector<ZipEntry> buildDocxParts(const std::string& documentXml)
+        {
+            std::string contentTypes = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>)";
+            std::string rels = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>)";
+            std::string wordRels = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+</Relationships>)";
+            return {
+                {"[Content_Types].xml", contentTypes},
+                {"_rels/.rels", rels},
+                {"word/_rels/document.xml.rels", wordRels},
+                {"word/document.xml", documentXml},
+            };
         }
 
         std::string generateDocxXml(const std::string& title, const std::map<std::string, std::string>& data)
@@ -125,31 +303,6 @@ namespace soilwatercm::services
 
             return xml.str();
         }
-
-        std::string wrapInDocx(const std::string& documentXml)
-        {
-            std::ostringstream zip;
-
-            zip << "[Content_Types].xml" << std::string("\x00", 1);
-
-            std::string contentTypes = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>)";
-
-            std::string rels = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>)";
-
-            std::string wordRels = R"(<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-</Relationships>)";
-
-            return contentTypes + "\n" + rels + "\n" + wordRels + "\n" + documentXml;
-        }
     }  // namespace
 
     ReportService::ReportService(std::shared_ptr<dao::ReportDao> reportDao,
@@ -214,14 +367,9 @@ namespace soilwatercm::services
 
         std::string documentXml = generateDocxXml(title, data);
 
-        std::ofstream ofs(outputPath, std::ios::binary);
-        if (!ofs.is_open())
-        {
-            throw common::ProcessingException("Failed to create DOCX file: " + outputPath);
-        }
-
-        ofs << documentXml;
-        ofs.close();
+        // DOCX 即 ZIP 包: 生成真 OOXML 容器 (Content_Types + 关系 + 正文), Word 可打开
+        auto parts = buildDocxParts(documentXml);
+        writeStoredZip(outputPath, parts);
 
         utils::Logger::info("DOCX generated: {}", outputPath);
 
@@ -244,40 +392,48 @@ namespace soilwatercm::services
 
         utils::Logger::warn("LibreOffice PDF conversion failed, creating placeholder PDF");
 
-        std::ofstream pdfFile(fullPdfPath, std::ios::binary);
-        pdfFile << R"(%PDF-1.4
-1 0 obj
-<< /Type /Catalog /Pages 2 0 R >>
-endobj
-2 0 obj
-<< /Type /Pages /Kids [3 0 R] /Count 1 >>
-endobj
-3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
-endobj
-4 0 obj
-<< /Length 44 >>
-stream
-BT /F1 24 Tf 100 700 Td (Report) Tj ET
-endstream
-endobj
-5 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
-endobj
-xref
-0 6
-0000000000 65535 f 
-0000000009 00000 n 
-0000000058 00000 n 
-0000000115 00000 n 
-0000000266 00000 n 
-0000000360 00000 n 
-trailer
-<< /Size 6 /Root 1 0 R >>
-startxref
-437
-%%EOF)";
+        // 生成有效单页 PDF (ASCII 标题/时间戳, 中文字体不嵌入, 完整正文见 DOCX)
+        std::string titleAscii = "SoilWaterCM Report";
+        {
+            std::string slug = paramsTitleToAscii(pdfPath);
+            if (!slug.empty())
+                titleAscii = slug;
+        }
+        std::string genAt = currentTimeStr();
 
+        std::string contentStream = "BT /F1 18 Tf 72 720 Td (" + escapePdfAscii(titleAscii) + ") Tj ET\n"
+                                    "BT /F1 10 Tf 72 700 Td (Generated " + escapePdfAscii(genAt) + ") Tj ET\n"
+                                    "BT /F1 10 Tf 72 680 Td (Full report content in the accompanying .docx) Tj ET";
+
+        std::vector<std::string> objects = {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            "<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n" + contentStream + "\nendstream",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        };
+
+        std::ostringstream pdf;
+        pdf << "%PDF-1.4\n";
+        std::vector<uint32_t> offsets;
+        for (size_t i = 0; i < objects.size(); ++i)
+        {
+            offsets.push_back(static_cast<uint32_t>(pdf.str().size()));
+            pdf << (i + 1) << " 0 obj\n" << objects[i] << "\nendobj\n";
+        }
+        uint32_t xrefPos = static_cast<uint32_t>(pdf.str().size());
+        pdf << "xref\n0 " << (objects.size() + 1) << "\n";
+        pdf << "0000000000 65535 f \n";
+        for (auto off : offsets)
+        {
+            char buf[12];
+            std::snprintf(buf, sizeof(buf), "%010u", off);
+            pdf << buf << " 00000 n \n";
+        }
+        pdf << "trailer\n<< /Size " << (objects.size() + 1) << " /Root 1 0 R >>\nstartxref\n" << xrefPos << "\n%%EOF";
+
+        std::ofstream pdfFile(fullPdfPath, std::ios::binary);
+        pdfFile << pdf.str();
         pdfFile.close();
 
         return fullPdfPath;

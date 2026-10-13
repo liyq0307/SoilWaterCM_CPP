@@ -195,18 +195,20 @@ namespace soilwatercm::services
     {
         try
         {
-            taskDao_->updateStatus(taskId, models::TaskStatus::Running, 20.0);
+            taskDao_->updateStatus(taskId, models::TaskStatus::Running, 10.0);
             std::filesystem::create_directories(outputDir);
 
-            // DSM 高程骤降差值算法 (rasterio) 未移植: 简化为占位输出, 不产生异常记录
+            // DSM 高程骤降差值算法 (rasterio) 未移植: 写占位说明, 不产生异常记录。
+            // 不再"假成功"置 Completed, 改显式 Failed 并写清原因。
             nlohmann::json placeholder;
             placeholder["status"] = "not_implemented";
-            placeholder["note"] = "DSM 差值检测待移植, 任务已登记, 未生成异常图斑";
+            placeholder["note"] = "DSM 差值检测待移植, 未生成异常图斑";
             std::ofstream((std::filesystem::path(outputDir) / "rapid_change.json").string()) << placeholder.dump(2);
 
             taskDao_->updateResult(taskId, outputDir);
-            taskDao_->updateStatus(taskId, models::TaskStatus::Completed, 100.0);
-            utils::Logger::info("Monitoring: rapid_change task {} done (simplified), out={}", taskId, outputDir);
+            taskDao_->updateStatusAndMessage(taskId, models::TaskStatus::Failed, 10.0,
+                                             "rapid_change: DSM 差值检测未移植 (C++ 后端未实现), 未生成异常图斑");
+            utils::Logger::warn("Monitoring: rapid_change task {} marked failed (not implemented)", taskId);
         }
         catch (const std::exception& e)
         {

@@ -211,6 +211,9 @@ namespace soilwatercm::services
         result["source"] = source;
         result["count"] = static_cast<int>(scenes.size());
         result["scenes"] = std::move(scenes);
+        // 卫星数据源客户端当前为桩实现: 显式标注, 前端可提示"检索/采集未接入真实数据源"
+        result["stub"] = true;
+        result["note"] = "卫星检索客户端为桩实现 (C++ 后端未接入真实数据源), 结果为空";
         return result;
     }
 
@@ -299,6 +302,7 @@ namespace soilwatercm::services
             std::filesystem::create_directories(outputDir);
 
             nlohmann::json collected = nlohmann::json::array();
+            bool collectedAny = false;
             for (const auto& dt : dataTypes)
             {
                 std::string source = sourceForDataType(dt);
@@ -326,6 +330,8 @@ namespace soilwatercm::services
                         std::string path = satelliteClient_->downloadImage(latest, sceneDir);
                         item["download_status"] = path.empty() ? "pending" : "downloaded";
                         item["output_path"] = sceneDir;
+                        if (!path.empty())
+                            collectedAny = true;
                     }
                 }
                 catch (const std::exception& e)
@@ -337,9 +343,21 @@ namespace soilwatercm::services
             }
 
             taskDao_->updateResult(taskId, outputDir);
-            taskDao_->updateStatus(taskId, models::TaskStatus::Completed, 100.0);
-            utils::Logger::info("Acquisition: collect task {} done, {} data types, out={}, detail={}", taskId,
-                                dataTypes.size(), outputDir, collected.dump());
+            if (collectedAny)
+            {
+                taskDao_->updateStatus(taskId, models::TaskStatus::Completed, 100.0);
+                utils::Logger::info("Acquisition: collect task {} done, {} data types, out={}, detail={}", taskId,
+                                    dataTypes.size(), outputDir, collected.dump());
+            }
+            else
+            {
+                // 桩客户端未采集到影像: 显式 Failed, 避免前端误判成功
+                taskDao_->updateStatusAndMessage(
+                    taskId, models::TaskStatus::Failed, 50.0,
+                    "卫星采集客户端为桩实现 (C++ 后端未接入真实数据源), 未采集到影像");
+                utils::Logger::warn("Acquisition: collect task {} marked failed (stub client, no scenes), out={}",
+                                    taskId, outputDir);
+            }
         }
         catch (const std::exception& e)
         {

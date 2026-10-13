@@ -476,6 +476,41 @@ namespace soilwatercm::controllers
         return anomalyDao_;
     }
 
+    std::shared_ptr<dao::LandUseResultDao> ExtractionController::landuseResultDao()
+    {
+        if (!landuseResultDao_)
+            landuseResultDao_ = std::make_shared<dao::LandUseResultDao>(sharedRepo());
+        return landuseResultDao_;
+    }
+
+    std::shared_ptr<dao::SegmentationResultDao> ExtractionController::segmentationResultDao()
+    {
+        if (!segmentationResultDao_)
+            segmentationResultDao_ = std::make_shared<dao::SegmentationResultDao>(sharedRepo());
+        return segmentationResultDao_;
+    }
+
+    std::shared_ptr<dao::SpoilDumpDao> ExtractionController::spoilDumpDao()
+    {
+        if (!spoilDumpDao_)
+            spoilDumpDao_ = std::make_shared<dao::SpoilDumpDao>(sharedRepo());
+        return spoilDumpDao_;
+    }
+
+    std::shared_ptr<dao::TrainedModelDao> ExtractionController::trainedModelDao()
+    {
+        if (!trainedModelDao_)
+            trainedModelDao_ = std::make_shared<dao::TrainedModelDao>(sharedRepo());
+        return trainedModelDao_;
+    }
+
+    std::shared_ptr<dao::MeasureDao> ExtractionController::measureDao()
+    {
+        if (!measureDao_)
+            measureDao_ = std::make_shared<dao::MeasureDao>(sharedRepo());
+        return measureDao_;
+    }
+
     Json::Value ExtractionController::disturbanceToJson(const models::Disturbance& d)
     {
         Json::Value j;
@@ -784,28 +819,180 @@ namespace soilwatercm::controllers
         }
     }
 
-    void ExtractionController::listLanduse(const drogon::HttpRequestPtr& /*req*/,
+    void ExtractionController::getMeasure(const drogon::HttpRequestPtr& /*req*/,
+                                          std::function<void(const drogon::HttpResponsePtr&)>&& callback, int id)
+    {
+        try
+        {
+            auto mOpt = measureDao()->findById(id);
+            if (!mOpt)
+            {
+                callback(errorResp("措施不存在", drogon::k404NotFound));
+                return;
+            }
+            callback(jsonResp(measureToJson(*mOpt)));
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k500InternalServerError));
+        }
+    }
+
+    void ExtractionController::deleteMeasure(const drogon::HttpRequestPtr& /*req*/,
+                                             std::function<void(const drogon::HttpResponsePtr&)>&& callback, int id)
+    {
+        try
+        {
+            auto mOpt = measureDao()->findById(id);
+            if (!mOpt)
+            {
+                callback(errorResp("措施不存在", drogon::k404NotFound));
+                return;
+            }
+            if (!measureDao()->remove(id))
+            {
+                callback(errorResp("删除措施失败", drogon::k500InternalServerError));
+                return;
+            }
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k204NoContent);
+            callback(resp);
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k500InternalServerError));
+        }
+    }
+
+    void ExtractionController::listLanduse(const drogon::HttpRequestPtr& req,
                                            std::function<void(const drogon::HttpResponsePtr&)>&& callback)
     {
-        // 本项目无 land_use_results 表/DAO (土地利用分类成果未移植), 返回空数组
-        Json::Value out(Json::arrayValue);
-        callback(jsonResp(out));
+        try
+        {
+            auto params = parseParams(req);
+            int projectId = getInt(params, "project_id");
+            if (projectId <= 0)
+            {
+                callback(errorResp("缺少 project_id"));
+                return;
+            }
+            std::optional<int> periodId;
+            if (getInt(params, "period_id") > 0)
+                periodId = getInt(params, "period_id");
+
+            auto rows = landuseResultDao()->findByProject(projectId, periodId);
+
+            Json::Value out(Json::arrayValue);
+            for (const auto& r : rows)
+            {
+                Json::Value j;
+                j["id"] = r.id;
+                j["project_id"] = r.project_id;
+                j["period_id"] = r.period_id ? *r.period_id : Json::nullValue;
+                j["image_id"] = r.image_id ? *r.image_id : Json::nullValue;
+                j["method"] = r.method;
+                j["n_classes"] = r.n_classes ? *r.n_classes : Json::nullValue;
+                j["raster_path"] = r.raster_path;
+                if (!r.class_areas_json.empty())
+                {
+                    Json::Value cv;
+                    Json::Reader reader;
+                    reader.parse(r.class_areas_json, cv, false);
+                    j["class_areas"] = cv;
+                }
+                out.append(j);
+            }
+            callback(jsonResp(out));
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k500InternalServerError));
+        }
     }
 
-    void ExtractionController::listSegments(const drogon::HttpRequestPtr& /*req*/,
+    void ExtractionController::listSegments(const drogon::HttpRequestPtr& req,
                                             std::function<void(const drogon::HttpResponsePtr&)>&& callback)
     {
-        // 本项目无 segmentation_results 表/DAO, 返回空数组
-        Json::Value out(Json::arrayValue);
-        callback(jsonResp(out));
+        try
+        {
+            auto params = parseParams(req);
+            std::optional<int> imageId;
+            if (getInt(params, "image_id") > 0)
+                imageId = getInt(params, "image_id");
+            std::optional<int> projectId;
+            if (getInt(params, "project_id") > 0)
+                projectId = getInt(params, "project_id");
+
+            auto rows = segmentationResultDao()->findByFilter(imageId, projectId);
+
+            Json::Value out(Json::arrayValue);
+            for (const auto& r : rows)
+            {
+                Json::Value j;
+                j["id"] = r.id;
+                j["image_id"] = r.image_id;
+                j["project_id"] = r.project_id ? *r.project_id : Json::nullValue;
+                j["period_id"] = r.period_id ? *r.period_id : Json::nullValue;
+                j["method"] = r.method;
+                j["n_segments"] = r.n_segments ? *r.n_segments : Json::nullValue;
+                j["raster_path"] = r.raster_path;
+                out.append(j);
+            }
+            callback(jsonResp(out));
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k500InternalServerError));
+        }
     }
 
-    void ExtractionController::listSpoilDumps(const drogon::HttpRequestPtr& /*req*/,
+    void ExtractionController::listSpoilDumps(const drogon::HttpRequestPtr& req,
                                               std::function<void(const drogon::HttpResponsePtr&)>&& callback)
     {
-        // 本项目无 spoil_dumps 表/DAO, 返回空数组
-        Json::Value out(Json::arrayValue);
-        callback(jsonResp(out));
+        try
+        {
+            auto params = parseParams(req);
+            int projectId = getInt(params, "project_id");
+            if (projectId <= 0)
+            {
+                callback(errorResp("缺少 project_id"));
+                return;
+            }
+            std::optional<int> periodId;
+            if (getInt(params, "period_id") > 0)
+                periodId = getInt(params, "period_id");
+            std::string compliance = getStr(params, "compliance");
+            std::string stability = getStr(params, "stability_level");
+
+            auto rows = spoilDumpDao()->findByProject(projectId, periodId, compliance, stability);
+
+            Json::Value out(Json::arrayValue);
+            for (const auto& s : rows)
+            {
+                Json::Value j;
+                j["id"] = s.id;
+                j["project_id"] = s.project_id;
+                j["period_id"] = s.period_id;
+                j["image_id"] = s.image_id ? *s.image_id : Json::nullValue;
+                j["area_m2"] = s.area_m2;
+                j["volume_m3"] = s.volume_m3 ? *s.volume_m3 : Json::nullValue;
+                j["max_height_m"] = s.max_height_m ? *s.max_height_m : Json::nullValue;
+                j["mean_height_m"] = s.mean_height_m ? *s.mean_height_m : Json::nullValue;
+                j["in_approved_area"] = s.in_approved_area ? *s.in_approved_area : Json::nullValue;
+                j["has_protection"] = s.has_protection ? *s.has_protection : Json::nullValue;
+                j["stability_level"] = s.stability_level;
+                j["risk_score"] = s.risk_score ? *s.risk_score : Json::nullValue;
+                j["compliance"] = s.compliance;
+                j["detect_method"] = s.detect_method;
+                j["confidence"] = s.confidence ? *s.confidence : Json::nullValue;
+                out.append(j);
+            }
+            callback(jsonResp(out));
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k500InternalServerError));
+        }
     }
 
     void ExtractionController::autoDetectSpoilDumps(const drogon::HttpRequestPtr& req,
@@ -913,15 +1100,54 @@ namespace soilwatercm::controllers
         submitAiPlaceholder(req, std::move(callback), "predict_change");
     }
 
-    void ExtractionController::latestTrainedModel(const drogon::HttpRequestPtr& /*req*/,
+    void ExtractionController::latestTrainedModel(const drogon::HttpRequestPtr& req,
                                                   std::function<void(const drogon::HttpResponsePtr&)>&& callback)
     {
-        // 本项目无训练模型注册表 (trained_models 表未移植), 返回空占位 (对齐 Python 无模型分支)
-        Json::Value out;
-        out["task_id"] = Json::nullValue;
-        out["model_exists"] = false;
-        out["models"] = Json::Value(Json::arrayValue);
-        callback(jsonResp(out));
+        try
+        {
+            auto params = parseParams(req);
+            int projectId = getInt(params, "project_id");
+            if (projectId <= 0)
+            {
+                callback(errorResp("缺少 project_id"));
+                return;
+            }
+
+            Json::Value out;
+            out["task_id"] = Json::nullValue;
+            out["model_exists"] = false;
+            out["models"] = Json::Value(Json::arrayValue);
+
+            auto models = trainedModelDao()->findByProject(projectId, false);
+            Json::Value arr = out["models"];
+            for (const auto& m : models)
+            {
+                Json::Value j;
+                j["id"] = m.id;
+                j["method"] = m.method;
+                j["model_name"] = m.model_name;
+                j["model_path"] = m.model_path;
+                j["status"] = m.status;
+                j["source_task_id"] = m.source_task_id ? (Json::Int64)*m.source_task_id : Json::nullValue;
+                arr.append(j);
+                // 最新 (列表按 created_at DESC) 作为兼容字段
+                if (!out["model_exists"].asBool())
+                {
+                    out["model_exists"] = true;
+                    out["model_name"] = m.model_name;
+                    out["model_path"] = m.model_path;
+                    out["method"] = m.method;
+                    if (m.source_task_id)
+                        out["task_id"] = (Json::Int64)*m.source_task_id;
+                }
+            }
+            out["models"] = arr;
+            callback(jsonResp(out));
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k500InternalServerError));
+        }
     }
 
     void ExtractionController::finetuneResources(const drogon::HttpRequestPtr& /*req*/,

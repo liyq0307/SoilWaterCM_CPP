@@ -39,6 +39,7 @@ namespace soilwatercm::controllers
         ADD_METHOD_TO(ImageController::downloadImage, "/api/v1/images/{id}/download", drogon::Get);
         ADD_METHOD_TO(ImageController::qualityCheck, "/api/v1/images/{id}/quality-check", drogon::Post);
         ADD_METHOD_TO(ImageController::deletePreprocess, "/api/v1/images/{id}/preprocess", drogon::Delete);
+        ADD_METHOD_TO(ImageController::serve3DTiles, "/api/v1/images/{id}/3dtiles/{tile_path:.*}", drogon::Get);
         METHOD_LIST_END
 
         /**
@@ -150,6 +151,19 @@ namespace soilwatercm::controllers
          */
         void deletePreprocess(const drogon::HttpRequestPtr& req,
                               std::function<void(const drogon::HttpResponsePtr&)>&& callback, int id);
+
+        /**
+         * @brief GET /api/v1/images/{id}/3dtiles/{tile_path:.*} 倾斜摄影 3D Tiles 文件代理
+         *
+         * Cesium 加载斜投影模型时引用登记记录目录内的切片文件。仅允许访问
+         * 该记录 tileset.json 所在目录内的文件 (路径越界防护)。
+         * @param imageId 影像主键
+         * @param tilePath 相对 tileset 根目录的文件路径
+         * @return 通过 callback 返回文件; 非 3DTiles 记录或越界返回 404
+         */
+        void serve3DTiles(const drogon::HttpRequestPtr& req,
+                          std::function<void(const drogon::HttpResponsePtr&)>&& callback, int imageId,
+                          const std::string& tilePath);
 
     private:
         std::shared_ptr<services::ImageService> imageService_;

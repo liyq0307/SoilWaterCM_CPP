@@ -78,6 +78,14 @@ namespace soilwatercm::services
         std::future<InsarProcessResult> submitInsarTask(const InsarProcessParams& params);
 
         /**
+         * @brief 复用已有任务记录执行 InSAR (控制器先建任务再执行时走此重载)
+         * @param params 处理入参
+         * @param taskId 已登记的任务 id
+         * @return 结果 future
+         */
+        std::future<InsarProcessResult> submitInsarTask(const InsarProcessParams& params, int taskId);
+
+        /**
          * @brief D-InSAR 主流程
          *
          * 干涉图 -> Goldstein 滤波 -> Snaphu 解缠 -> LOS 形变 -> 大气校正;

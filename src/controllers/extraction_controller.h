@@ -7,7 +7,11 @@
 
 #include "../dao/anomaly_dao.h"
 #include "../dao/image_dao.h"
+#include "../dao/result_dao.h"
+#include "../dao/spoil_dump_dao.h"
 #include "../dao/task_dao.h"
+#include "../dao/trained_model_dao.h"
+#include "../dao/measure_dao.h"
 #include "../services/disturbance_service.h"
 #include "../services/erosion_service.h"
 #include "../services/fvc_service.h"
@@ -50,6 +54,8 @@ namespace soilwatercm::controllers
         ADD_METHOD_TO(ExtractionController::listMeasures, "/api/v1/extraction/measures", drogon::Get);
         ADD_METHOD_TO(ExtractionController::autoInterpretMeasures, "/api/v1/extraction/measures/auto-interpret",
                       drogon::Post);
+        ADD_METHOD_TO(ExtractionController::getMeasure, "/api/v1/measures/{id}", drogon::Get);
+        ADD_METHOD_TO(ExtractionController::deleteMeasure, "/api/v1/measures/{id}", drogon::Delete);
         ADD_METHOD_TO(ExtractionController::listLanduse, "/api/v1/extraction/landuse", drogon::Get);
         ADD_METHOD_TO(ExtractionController::listSegments, "/api/v1/extraction/segments", drogon::Get);
         ADD_METHOD_TO(ExtractionController::listSpoilDumps, "/api/v1/extraction/spoil-dumps", drogon::Get);
@@ -134,15 +140,31 @@ namespace soilwatercm::controllers
                                    std::function<void(const drogon::HttpResponsePtr&)>&& callback);
 
         /**
+         * @brief GET /api/v1/measures/{id} 措施详情
+         * @param id 措施主键
+         * @return 通过 callback 返回措施; 不存在返回 404
+         */
+        void getMeasure(const drogon::HttpRequestPtr& req,
+                        std::function<void(const drogon::HttpResponsePtr&)>&& callback, int id);
+
+        /**
+         * @brief DELETE /api/v1/measures/{id} 删除措施
+         * @param id 措施主键
+         * @return 通过 callback 返回 204; 不存在返回 404
+         */
+        void deleteMeasure(const drogon::HttpRequestPtr& req,
+                           std::function<void(const drogon::HttpResponsePtr&)>&& callback, int id);
+
+        /**
          * @brief GET /api/v1/extraction/landuse 土地利用分类成果列表
-         * @return 通过 callback 返回成果列表; 成果未实现, 当前恒为空数组
+         * @return 通过 callback 返回 landuse_results 表成果列表
          */
         void listLanduse(const drogon::HttpRequestPtr& req,
                          std::function<void(const drogon::HttpResponsePtr&)>&& callback);
 
         /**
          * @brief GET /api/v1/extraction/segments 影像分割成果列表
-         * @return 通过 callback 返回成果列表; 成果未实现, 当前恒为空数组
+         * @return 通过 callback 返回 segmentation_results 表成果列表
          */
         void listSegments(const drogon::HttpRequestPtr& req,
                           std::function<void(const drogon::HttpResponsePtr&)>&& callback);
@@ -236,10 +258,20 @@ namespace soilwatercm::controllers
         std::shared_ptr<dao::TaskDao> taskDao();
         std::shared_ptr<dao::ImageDao> imageDao();
         std::shared_ptr<dao::AnomalyDao> anomalyDao();
+        std::shared_ptr<dao::LandUseResultDao> landuseResultDao();
+        std::shared_ptr<dao::SegmentationResultDao> segmentationResultDao();
+        std::shared_ptr<dao::SpoilDumpDao> spoilDumpDao();
+        std::shared_ptr<dao::TrainedModelDao> trainedModelDao();
+        std::shared_ptr<dao::MeasureDao> measureDao();
         std::shared_ptr<repository::PostgresRepository> repo_;
         std::shared_ptr<dao::TaskDao> taskDao_;
         std::shared_ptr<dao::ImageDao> imageDao_;
         std::shared_ptr<dao::AnomalyDao> anomalyDao_;
+        std::shared_ptr<dao::LandUseResultDao> landuseResultDao_;
+        std::shared_ptr<dao::SegmentationResultDao> segmentationResultDao_;
+        std::shared_ptr<dao::SpoilDumpDao> spoilDumpDao_;
+        std::shared_ptr<dao::TrainedModelDao> trainedModelDao_;
+        std::shared_ptr<dao::MeasureDao> measureDao_;
 
         /// @brief 建 pending 任务; params.task_type 区分业务类型, AI 类任务后台置失败并说明原因
         models::Task createAiTask(const std::string& taskType, int projectId, int periodId,

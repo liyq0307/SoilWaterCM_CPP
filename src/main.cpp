@@ -37,7 +37,11 @@
 #include "dao/project_dao.h"
 #include "dao/project_document_dao.h"
 #include "dao/report_dao.h"
+#include "dao/result_dao.h"
+#include "dao/spoil_dump_dao.h"
 #include "dao/task_dao.h"
+#include "dao/terrain_result_dao.h"
+#include "dao/trained_model_dao.h"
 #include "dao/user_dao.h"
 #include "dao/vegetation_coverage_dao.h"
 #include "dao/zone_dao.h"
@@ -48,6 +52,7 @@
 #include "infrastructure/external_tools/otb_interface.h"
 #include "infrastructure/external_tools/saga_interface.h"
 #include "infrastructure/file_manager.h"
+#include "infrastructure/metrics_collector.h"
 #include "infrastructure/gdal/gdal_wrapper.h"
 #include "infrastructure/gdal/raster_processor.h"
 #include "infrastructure/gdal/vector_processor.h"
@@ -81,6 +86,7 @@
 #include "services/project_service.h"
 #include "services/qgis_service.h"
 #include "services/report_service.h"
+#include "services/scheduler_service.h"
 #include "services/scene_layer_service.h"
 #include "services/task_service.h"
 #include "services/zone_service.h"
@@ -92,6 +98,7 @@ using namespace soilwatercm;
 namespace
 {
     std::shared_ptr<services::AuthService> g_authService;
+    std::shared_ptr<repository::PostgresRepository> g_pgRepo;
 }
 
 void initLogging()
@@ -151,6 +158,7 @@ void initServices()
     pgCfg.password = config.getPostgresPassword();
     auto pgPool = std::make_shared<repository::PostgresConnectionPool>(pgCfg);
     auto pgRepo = std::make_shared<repository::PostgresRepository>(pgPool);
+    g_pgRepo = pgRepo;
 
     auto userDao = std::make_shared<dao::UserDao>(pgRepo);
     auto projectDao = std::make_shared<dao::ProjectDao>(pgRepo);
@@ -169,6 +177,11 @@ void initServices()
     auto groundTruthDao = std::make_shared<dao::GroundTruthDao>(pgRepo);
     auto basemapDao = std::make_shared<dao::BasemapDao>(pgRepo);
     auto projectDocumentDao = std::make_shared<dao::ProjectDocumentDao>(pgRepo);
+    auto terrainResultDao = std::make_shared<dao::TerrainResultDao>(pgRepo);
+    auto landuseResultDao = std::make_shared<dao::LandUseResultDao>(pgRepo);
+    auto segmentationResultDao = std::make_shared<dao::SegmentationResultDao>(pgRepo);
+    auto spoilDumpDao = std::make_shared<dao::SpoilDumpDao>(pgRepo);
+    auto trainedModelDao = std::make_shared<dao::TrainedModelDao>(pgRepo);
 
     auto gdal = std::make_shared<infrastructure::gdal::GdalWrapper>();
     auto rasterProcessor = std::make_shared<infrastructure::gdal::RasterProcessor>();
@@ -185,7 +198,8 @@ void initServices()
     auto projectService = std::make_shared<services::ProjectService>(projectDao, periodDao, gdal, projectDocumentDao);
     auto imageService = std::make_shared<services::ImageService>(imageDao, fileManager, gdal);
     auto taskService = std::make_shared<services::TaskService>(taskDao);
-    auto anomalyService = std::make_shared<services::AnomalyService>(anomalyDao);
+    auto anomalyService = std::make_shared<services::AnomalyService>(anomalyDao, disturbanceDao, terrainResultDao,
+                                                                     erosionDao);
     auto reportService = std::make_shared<services::ReportService>(reportDao, fileManager);
     auto evaluationService = std::make_shared<services::EvaluationService>(evaluationDao, taskDao);
     auto fvcService = std::make_shared<services::FvcService>(fvcDao, imageDao, taskDao, gdal, rasterProcessor);
@@ -196,8 +210,14 @@ void initServices()
     auto measureService = std::make_shared<services::MeasureService>(measureDao, taskDao, gdal, vectorProcessor);
     auto preprocessService =
         std::make_shared<services::PreprocessService>(imageDao, taskDao, gdal, rasterProcessor, otb);
-    auto insarService =
-        std::make_shared<services::InsarService>(taskDao, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    auto insarService = std::make_shared<services::InsarService>(
+        taskDao,
+        std::make_shared<infrastructure::SnaphuWrapper>(),
+        std::make_shared<infrastructure::InterferogramGenerator>(),
+        std::make_shared<infrastructure::PhaseFilter>(),
+        std::make_shared<infrastructure::DeformationCalculator>(),
+        std::make_shared<infrastructure::MintPyInterface>(),
+        std::make_shared<infrastructure::Pyaps3Interface>());
     auto dashboardService = std::make_shared<services::DashboardService>(projectDao, imageDao, taskDao, anomalyDao);
     auto qgisService = std::make_shared<services::QgisService>(qgisClient, gdal);
     auto zoneService = std::make_shared<services::ZoneService>(zoneDao);
@@ -209,16 +229,24 @@ void initServices()
     auto periodService = std::make_shared<services::PeriodService>(periodDao, disturbanceDao, fvcDao, erosionDao,
                                                                    measureDao, anomalyDao, reportDao);
     auto sceneLayerService = std::make_shared<services::SceneLayerService>(disturbanceDao, measureDao, anomalyDao,
-                                                                           periodDao, fvcDao, erosionDao);
+                                                                           periodDao, fvcDao, erosionDao,
+                                                                           terrainResultDao, spoilDumpDao,
+                                                                           vectorProcessor);
     auto monitoringService = std::make_shared<services::MonitoringService>(periodDao, taskDao);
     auto dynamicService = std::make_shared<services::DynamicService>(periodDao, imageDao, taskDao, indicatorDao, fvcDao,
                                                                      erosionDao, disturbanceDao, measureDao);
+
+    // 定时任务调度器 (季度/年报 + 孤立成果清理), 替代 Python Celery beat
+    auto schedulerService = std::make_shared<services::SchedulerService>(projectDao, periodDao, reportService,
+                                                                         fvcDao, erosionDao, landuseResultDao,
+                                                                         segmentationResultDao, terrainResultDao);
+    schedulerService->start();
 
     drogon::app().registerController(std::make_shared<controllers::AuthController>(g_authService));
     drogon::app().registerController(std::make_shared<controllers::UserController>(userDao, g_authService));
     drogon::app().registerController(std::make_shared<controllers::ProjectController>(projectService));
     drogon::app().registerController(std::make_shared<controllers::ImageController>(imageService));
-    drogon::app().registerController(std::make_shared<controllers::ProcessingController>(preprocessService));
+    drogon::app().registerController(std::make_shared<controllers::ProcessingController>(preprocessService, insarService));
     drogon::app().registerController(std::make_shared<controllers::ExtractionController>(
         fvcService, erosionService, disturbanceService, measureService));
     drogon::app().registerController(std::make_shared<controllers::EvaluationController>(evaluationService));
@@ -265,6 +293,50 @@ void registerControllers()
     utils::Logger::info("Controllers registered via registerController calls");
 }
 
+// 注册运维端点: /health (存活 + DB 探活) 与 /metrics (Prometheus 文本)
+void registerSystemRoutes()
+{
+    drogon::app().registerHandler(
+        "/health",
+        [](const drogon::HttpRequestPtr& /*req*/,
+           std::function<void(const drogon::HttpResponsePtr&)>&& callback)
+        {
+            Json::Value body;
+            body["status"] = "ok";
+            body["service"] = "soilwatercm";
+            body["version"] = "1.0";
+
+            // DB 探活: 连不上则标记 degraded 并返回 503
+            bool dbOk = false;
+            if (g_pgRepo)
+            {
+                auto rows = g_pgRepo->executeQuery("SELECT 1 AS ok");
+                dbOk = !rows.empty();
+            }
+            body["database"] = dbOk ? "up" : "down";
+
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(body);
+            resp->setStatusCode(dbOk ? drogon::k200OK : drogon::k503ServiceUnavailable);
+            callback(resp);
+        },
+        {drogon::Get});
+
+    drogon::app().registerHandler(
+        "/metrics",
+        [](const drogon::HttpRequestPtr& /*req*/,
+           std::function<void(const drogon::HttpResponsePtr&)>&& callback)
+        {
+            auto resp = drogon::HttpResponse::newHttpResponse();
+            resp->setStatusCode(drogon::k200OK);
+            resp->setContentTypeCode(drogon::CT_TEXT_PLAIN);
+            resp->setBody(infrastructure::MetricsCollector::instance().exportPrometheus());
+            callback(resp);
+        },
+        {drogon::Get});
+
+    utils::Logger::info("System routes registered: /health /metrics");
+}
+
 int main(int argc, char* argv[])
 {
     try
@@ -279,6 +351,7 @@ int main(int argc, char* argv[])
         initDatabase();
         initServices();
         registerMiddleware();
+        registerSystemRoutes();
 
         drogon::app().loadConfigFile("config/drogon.json");
 

@@ -8,6 +8,8 @@
 
 #include <drogon/HttpTypes.h>
 
+#include <nlohmann/json.hpp>
+
 #include "../common/exceptions.h"
 #include "../infrastructure/config_manager.h"
 #include "../infrastructure/external/odm_client.h"
@@ -18,8 +20,9 @@
 namespace soilwatercm::controllers
 {
 
-    ProcessingController::ProcessingController(std::shared_ptr<services::PreprocessService> preprocessService)
-        : preprocessService_(std::move(preprocessService))
+    ProcessingController::ProcessingController(std::shared_ptr<services::PreprocessService> preprocessService,
+                                               std::shared_ptr<services::InsarService> insarService)
+        : preprocessService_(std::move(preprocessService)), insarService_(std::move(insarService))
     {
     }
 
@@ -194,6 +197,41 @@ namespace soilwatercm::controllers
         return threeDService_;
     }
 
+    std::shared_ptr<dao::TerrainResultDao> ProcessingController::terrainResultDao()
+    {
+        if (!terrainResultDao_)
+            terrainResultDao_ = std::make_shared<dao::TerrainResultDao>(sharedRepo());
+        return terrainResultDao_;
+    }
+
+    std::shared_ptr<dao::LandUseResultDao> ProcessingController::landuseResultDao()
+    {
+        if (!landuseResultDao_)
+            landuseResultDao_ = std::make_shared<dao::LandUseResultDao>(sharedRepo());
+        return landuseResultDao_;
+    }
+
+    std::shared_ptr<dao::SegmentationResultDao> ProcessingController::segmentationResultDao()
+    {
+        if (!segmentationResultDao_)
+            segmentationResultDao_ = std::make_shared<dao::SegmentationResultDao>(sharedRepo());
+        return segmentationResultDao_;
+    }
+
+    std::shared_ptr<dao::SpoilDumpDao> ProcessingController::spoilDumpDao()
+    {
+        if (!spoilDumpDao_)
+            spoilDumpDao_ = std::make_shared<dao::SpoilDumpDao>(sharedRepo());
+        return spoilDumpDao_;
+    }
+
+    std::shared_ptr<dao::TrainedModelDao> ProcessingController::trainedModelDao()
+    {
+        if (!trainedModelDao_)
+            trainedModelDao_ = std::make_shared<dao::TrainedModelDao>(sharedRepo());
+        return trainedModelDao_;
+    }
+
     Json::Value ProcessingController::param(const drogon::HttpRequestPtr& req, const std::string& key)
     {
         auto json = req->getJsonObject();
@@ -245,6 +283,13 @@ namespace soilwatercm::controllers
             }
         }
         return fallback;
+    }
+
+    std::shared_ptr<services::AnomalyService> ProcessingController::anomalyService()
+    {
+        if (!anomalyService_)
+            anomalyService_ = std::make_shared<services::AnomalyService>(std::make_shared<dao::AnomalyDao>(sharedRepo()));
+        return anomalyService_;
     }
 
     models::Task ProcessingController::createTaskRecord(models::TaskType type, int projectId, int periodId,
@@ -307,22 +352,25 @@ namespace soilwatercm::controllers
 
     void ProcessingController::runPlaceholderTask(int taskId, std::string outputDir, std::string taskType)
     {
+        // 算法未移植: 不再"假成功"(置 Completed 却不产成果会误导前端轮询),
+        // 改为显式 Failed 并写清原因, 前端可据此提示"该能力未启用"。
         try
         {
-            taskDao()->updateStatus(taskId, models::TaskStatus::Running, 20.0);
+            taskDao()->updateStatus(taskId, models::TaskStatus::Running, 10.0);
             std::filesystem::create_directories(outputDir);
 
-            // 算法未移植: 登记任务并写占位输出 (对齐 monitoring_service 占位模式)
             Json::Value ph;
             ph["status"] = "not_implemented";
-            ph["note"] = taskType + " 算法未移植, 任务已登记, 未生成成果";
+            ph["note"] = taskType + " 算法未移植, 任务未生成成果";
             std::ofstream ofs((std::filesystem::path(outputDir) / (taskType + ".json")).string());
             ofs << ph.toStyledString();
             ofs.close();
 
             taskDao()->updateResult(taskId, outputDir);
-            taskDao()->updateStatus(taskId, models::TaskStatus::Completed, 100.0);
-            utils::Logger::info("Processing: placeholder task {} ({}) done, out={}", taskId, taskType, outputDir);
+            taskDao()->updateStatusAndMessage(taskId, models::TaskStatus::Failed, 10.0,
+                                              taskType + ": 算法未移植 (C++ 后端未实现该处理), 无成果生成");
+            utils::Logger::warn("Processing: placeholder task {} ({}) marked failed (not implemented)", taskId,
+                                taskType);
         }
         catch (const std::exception& e)
         {
@@ -337,7 +385,7 @@ namespace soilwatercm::controllers
         }
     }
 
-    void ProcessingController::runInundationTask(int taskId, std::string demPath, double waterLevel)
+    void ProcessingController::runInundationTask(int taskId, int projectId, std::string demPath, double waterLevel)
     {
         try
         {
@@ -350,8 +398,26 @@ namespace soilwatercm::controllers
             params.dem_path = demPath;
             params.water_level = waterLevel;
 
-            std::string out = threeDService()->analyzeInundation(params);
+            services::InundationStats stats;
+            std::string out = threeDService()->analyzeInundation(params, &stats);
             taskDao()->updateResult(taskId, out);
+
+            // 落 terrain_results (analysis=inundation), 供 scene-layers 淹没图层与 terrain/results 读取
+            models::TerrainResult tr;
+            tr.project_id = projectId;
+            tr.analysis = "inundation";
+            tr.raster_path = out;
+            nlohmann::json sj;
+            sj["water_level_m"] = waterLevel;
+            sj["inundated_area_m2"] = stats.inundated_area_m2;
+            sj["total_area_m2"] = stats.total_area_m2;
+            sj["depth_mean_m"] = stats.depth_mean_m;
+            sj["depth_max_m"] = stats.depth_max_m;
+            sj["depth_raster"] = stats.depth_path;
+            tr.stats_json = sj.dump();
+            tr.created_at = std::chrono::system_clock::now();
+            terrainResultDao()->insert(tr);
+
             taskDao()->updateStatus(taskId, models::TaskStatus::Completed, 100.0);
             utils::Logger::info("Processing: inundation task {} done, out={}", taskId, out);
         }
@@ -368,8 +434,8 @@ namespace soilwatercm::controllers
         }
     }
 
-    void ProcessingController::runViewshedTask(int taskId, std::string demPath, double obsLon, double obsLat,
-                                               double obsHeight, double radiusM)
+    void ProcessingController::runViewshedTask(int taskId, int projectId, std::string demPath, double obsLon,
+                                                double obsLat, double obsHeight, double radiusM)
     {
         try
         {
@@ -385,8 +451,23 @@ namespace soilwatercm::controllers
             params.observer_height = obsHeight;
             params.max_distance = radiusM > 0.0 ? radiusM : 2000.0;
 
-            std::string out = threeDService()->analyzeViewshed(params);
+            services::ViewshedStats stats;
+            std::string out = threeDService()->analyzeViewshed(params, &stats);
             taskDao()->updateResult(taskId, out);
+
+            // 落 terrain_results (analysis=viewshed)
+            models::TerrainResult tr;
+            tr.project_id = projectId;
+            tr.analysis = "viewshed";
+            tr.raster_path = out;
+            nlohmann::json sj;
+            sj["visible_area_m2"] = stats.visible_area_m2;
+            sj["total_area_m2"] = stats.total_area_m2;
+            sj["visible_ratio"] = stats.visible_ratio;
+            tr.stats_json = sj.dump();
+            tr.created_at = std::chrono::system_clock::now();
+            terrainResultDao()->insert(tr);
+
             taskDao()->updateStatus(taskId, models::TaskStatus::Completed, 100.0);
             utils::Logger::info("Processing: viewshed task {} done, out={}", taskId, out);
         }
@@ -547,25 +628,87 @@ namespace soilwatercm::controllers
                 return;
             }
 
+            // 无注入的 InSAR 处理链时降级为占位 (保持旧行为, 任务登记后置失败)
+            if (!insarService_)
+            {
+                Json::Value taskParams;
+                taskParams["period_id"] = periodId;
+                auto task = createTaskRecord(models::TaskType::Insar, projectId, periodId, taskParams, "insar");
+                std::thread([this, taskId = task.id]()
+                             {
+                                 try
+                                 {
+                                     taskDao()->updateStatusAndMessage(
+                                         taskId, models::TaskStatus::Failed, 0.0, "InSAR 后端依赖未注入");
+                                 }
+                                 catch (...)
+                                 {
+                                 }
+                             })
+                             .detach();
+                callback(jsonResp(taskToJson(task)));
+                return;
+            }
+
             Json::Value taskParams;
             taskParams["period_id"] = periodId;
             auto task = createTaskRecord(models::TaskType::Insar, projectId, periodId, taskParams, "insar");
 
-            // main.cpp 中 insarService 的干涉图/滤波/解缠依赖均为 nullptr,
-            // 直接调用 executeDInsar 会空指针崩溃 — 后台线程仅登记并置失败, 待基础设施注入后移植
-            std::thread(
-                [this, taskId = task.id]()
-                {
-                    utils::Logger::warn("Processing: insar task {} skipped (InSAR 后端依赖未注入)", taskId);
-                    try
-                    {
-                        taskDao()->updateStatus(taskId, models::TaskStatus::Failed, 0.0);
-                    }
-                    catch (...)
-                    {
-                    }
-                })
-                .detach();
+            // 取该项目最近 2 期 SAR 影像, 较老为主, 较新为从 (对齐 Python task_insar_process)
+            auto sars = imageDao()->findLatestSar(projectId, 2);
+            if (sars.size() < 2)
+            {
+                taskDao()->updateStatusAndMessage(
+                    task.id, models::TaskStatus::Failed, 0.0, "InSAR 需要至少 2 期 SAR 影像");
+                callback(jsonResp(taskToJson(task)));
+                return;
+            }
+
+            services::InsarProcessParams params;
+            params.project_id = projectId;
+            params.period_id = periodId;
+            params.master_slc_path = sars[1].file_path;
+            params.slave_slc_path = sars[0].file_path;
+            params.output_dir = resultsSubdir("insar", projectId);
+            params.process_type = strParam(req, "process_type", "dinsar");
+
+            auto insarFut = insarService_->submitInsarTask(params, task.id);
+            // 后台等结果: 成功则落 terrain_results (analysis=insar) 并做形变异常检测 (对齐 Python task_insar_process)
+            auto futPtr = std::make_shared<std::future<services::InsarProcessResult>>(std::move(insarFut));
+            std::thread([this, projectId, periodId, taskId = task.id, futPtr]()
+                         {
+                             try
+                             {
+                                 auto result = futPtr->get();
+                                 if (result.success && result.deformation_path)
+                                 {
+                                     models::TerrainResult tr;
+                                     tr.project_id = projectId;
+                                     tr.analysis = "insar";
+                                     tr.raster_path = *result.deformation_path;
+                                     tr.stats_json = R"({"method":"insar"})";
+                                     tr.created_at = std::chrono::system_clock::now();
+                                     terrainResultDao()->insert(tr);
+
+                                     auto anomalies = anomalyService()->detectInsarDeformation(
+                                         projectId, periodId, *result.deformation_path);
+                                     utils::Logger::info("InSAR task {} done, anomalies={}", taskId,
+                                                          anomalies.size());
+                                 }
+                             }
+                             catch (const std::exception& e)
+                             {
+                                 utils::Logger::error("InSAR task {} post-process failed: {}", taskId, e.what());
+                                 try
+                                 {
+                                     taskDao()->updateStatus(taskId, models::TaskStatus::Failed, 0.0);
+                                 }
+                                 catch (...)
+                                 {
+                                 }
+                             }
+                         })
+                         .detach();
 
             callback(jsonResp(taskToJson(task)));
         }
@@ -683,8 +826,8 @@ namespace soilwatercm::controllers
 
             // ThreeDService::analyzeInundation 已有基于 DEM 的水位淹没能力
             std::string demPath = projectDemPath(projectId);
-            std::thread([this, taskId = task.id, demPath, waterLevel]()
-                        { runInundationTask(taskId, demPath, waterLevel); })
+            std::thread([this, taskId = task.id, projectId, demPath, waterLevel]()
+                        { runInundationTask(taskId, projectId, demPath, waterLevel); })
                 .detach();
 
             callback(jsonResp(taskToJson(task)));
@@ -720,8 +863,8 @@ namespace soilwatercm::controllers
 
             // ThreeDService::analyzeViewshed 已有基于 DEM 的通视能力
             std::string demPath = projectDemPath(projectId);
-            std::thread([this, taskId = task.id, demPath, obsLon, obsLat, obsHeight, radiusM]()
-                        { runViewshedTask(taskId, demPath, obsLon, obsLat, obsHeight, radiusM); })
+            std::thread([this, taskId = task.id, projectId, demPath, obsLon, obsLat, obsHeight, radiusM]()
+                        { runViewshedTask(taskId, projectId, demPath, obsLon, obsLat, obsHeight, radiusM); })
                 .detach();
 
             callback(jsonResp(taskToJson(task)));
@@ -945,12 +1088,46 @@ namespace soilwatercm::controllers
         }
     }
 
-    void ProcessingController::terrainResults(const drogon::HttpRequestPtr& /*req*/,
+    void ProcessingController::terrainResults(const drogon::HttpRequestPtr& req,
                                               std::function<void(const drogon::HttpResponsePtr&)>&& callback)
     {
-        // 本项目无 terrain_results 表/DAO (SAGA 地形成果未移植), 返回空数组
-        Json::Value out(Json::arrayValue);
-        callback(jsonResp(out));
+        try
+        {
+            int projectId = static_cast<int>(numParam(req, "project_id"));
+            if (projectId <= 0)
+            {
+                callback(errorResp("缺少 project_id"));
+                return;
+            }
+            std::string analysis = strParam(req, "analysis", "");
+
+            auto rows = terrainResultDao()->listByProject(projectId, analysis);
+            Json::Value out(Json::arrayValue);
+            for (const auto& r : rows)
+            {
+                // 对齐 Python: 过滤掉栅格文件已丢失的记录
+                if (r.raster_path.empty() || !std::filesystem::exists(r.raster_path))
+                    continue;
+                Json::Value j;
+                j["id"] = r.id;
+                j["project_id"] = r.project_id;
+                j["analysis"] = r.analysis;
+                j["raster_path"] = r.raster_path;
+                if (!r.stats_json.empty())
+                {
+                    Json::Value stats;
+                    Json::Reader reader;
+                    reader.parse(r.stats_json, stats, false);
+                    j["stats"] = std::move(stats);
+                }
+                out.append(j);
+            }
+            callback(jsonResp(out));
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k500InternalServerError));
+        }
     }
 
 }  // namespace soilwatercm::controllers

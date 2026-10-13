@@ -361,14 +361,28 @@ ctest -C RelWithDebInfo --output-on-failure
 
 ## 11. 已知限制
 
-以下能力为占位/桩实现, 端点可用但不产出真实结果:
+以下能力为占位/桩实现, 端点可用但**显式置任务为失败** (不再"假成功"):
 
-- **AI 训练/推理类**: FLAIR 微调、变化检测模型、开放词汇提取、UNet 分割训练等为任务占位。
-- **图像渲染类**: PNG/GIF/MP4 专题图、动态变化动画未移植, 相关端点返回数据或占位任务。
-- **卫星客户端**: Sentinel/Landsat/CRESDA 检索下载为桩实现。
-- **部分 InSAR / 地形分析**: GRID 差值、流域提取等算法为任务占位。
+- **AI 训练/推理类**: FLAIR 微调、变化检测模型、开放词汇提取、UNet 分割/分类训练等为任务占位, 后台标记 `failed` 并写"AI 后端未移植 (无 Python 运行时)"。
+- **图像渲染类**: PNG/GIF/MP4 专题图、动态变化动画未移植, 相关任务显式 `failed` 并写"渲染未移植, 无成果"。
+- **卫星客户端**: Sentinel/Landsat/CRESDA 检索/下载为桩实现; 检索响应带 `stub=true` 标注, 采集任务未采集到影像时显式 `failed`。
+- **部分地形/水文/调查算法**: 变化检测、地形指数、流域提取、坡耕地、淤地坝、地表判别、应急快检等未移植, 任务显式 `failed` 并写"算法未移植"。
 - **内存版栅格操作**: `RasterProcessor` 的 clip/mosaic/fillNodata 内存版为桩 (文件版接口真实处理)。
-- **scene-layers 部分图层**: 弃渣场、InSAR 成果、淹没、视域图层因缺底层数据表返回空集合。
+- **弃渣场自动识别**: `spoil-dumps/auto-detect` 的 DSM 差值识别算法未移植, 任务显式 `failed`; 但 `spoil_dumps` 表/列表/图层已可用 (手动或外部识别成果可落库展示)。
+- **通知渠道**: 预警推送 (邮件/短信/APP) 为占位, 仅记日志。
+
+已在本仓库补齐 (原为缺底层表/未接线, 现已可用):
+
+- **InSAR HTTP 链路**: D-InSAR 算法库 (干涉图/滤波/解缠/形变) 已接线, `processing/insar` 取项目最近 2 期 SAR 影像真实执行, 成果落 `terrain_results` 并触发形变异常检测。
+- **5 张成果表 + DAO**: `terrain_results`/`landuse_results`/`segmentation_results`/`spoil_dumps`/`trained_models` (DDL 见 `scripts/schema_results.sql`), 对应 extraction 列表与 scene-layers 端点已接真表。
+- **淹没/视域成果落库**: `inundation`/`viewshed` 分析成功后写 `terrain_results`, `scene-layers/inundation-geojson`、`viewshed-geojson` 栅格矢量化输出 GeoJSON。
+- **3D Tiles 文件服务**: `GET /images/{id}/3dtiles/{path}` 代理倾斜摄影切片 (含路径越界防护)。
+- **异常自动检测**: `anomalies/detect` 接入真实算法 —— 违规扰动 (Illegal 图斑)、InSAR 形变 (最新形变栅格连通域)、剧烈侵蚀 (侵蚀成果强烈及以上面积超阈值) 三类生成异常入库。
+- **措施 CRUD 补齐**: `GET/DELETE /measures/{id}` 措施详情与删除。
+- **运维端点**: `GET /health` (存活 + DB 探活, 连不上返回 503) 与 `GET /metrics` (Prometheus 文本) 已注册。
+- **定时任务调度**: `SchedulerService` 单线程 5 分钟粒度本地时钟轮询, 替代 Python Celery beat —— 季度/年报 (1/4/7/10 月 1 日 02 点、1 月 1 日 03 点) 按项目最新监测期自动出报, 每日 04 点清理 raster 文件全丢失的孤立成果记录 (5 张成果表)。当日守卫防重, 停机期间错过的窗口不补跑。
+- **报告渲染**: DOCX 生成真实 OOXML ZIP 包 (Word 可打开), PDF 经 LibreOffice 转换, 失败时回退为带正确 xref 的有效单页 PDF。
+- **占位任务不再假成功**: 未移植算法的渲染/分析任务统一显式 `failed`, 避免前端误判成功而无限轮询。
 
 ## 12. 相关文档
 

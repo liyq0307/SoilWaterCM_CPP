@@ -79,6 +79,24 @@ namespace soilwatercm::dao
         return images;
     }
 
+    std::vector<models::Image> ImageDao::findLatestSar(int projectId, int limit)
+    {
+        // type = 1 (ImageType::Sar), 按采集时间倒序取最近 N 期供 InSAR 主/从选择
+        std::string sql = buildSelectQuery(
+            "images",
+            {"id", "image_code", "type", "sensor_type", "acquisition_time", "ST_AsText(extent) as extent", "crs",
+             "resolution", "file_path", "file_size", "cloud_cover", "quality_status", "quality_message", "project_id",
+             "period_id"},
+            "project_id = " + std::to_string(projectId) + " AND type = " +
+            std::to_string(static_cast<int>(models::ImageType::Sar)));
+        sql += " ORDER BY acquisition_time DESC LIMIT " + std::to_string(limit);
+        auto result = repo_->executeQuery(sql);
+        std::vector<models::Image> images;
+        for (const auto& row : result)
+            images.push_back(mapRowToImage(row));
+        return images;
+    }
+
     std::vector<models::Image> ImageDao::list(int page, int pageSize, const std::string& orderBy, bool ascending)
     {
         std::string sql =

@@ -442,20 +442,22 @@ namespace soilwatercm::services
     {
         try
         {
-            taskDao_->updateStatus(taskId, models::TaskStatus::Running, 20.0);
+            taskDao_->updateStatus(taskId, models::TaskStatus::Running, 10.0);
             std::filesystem::create_directories(outputDir);
 
-            // PNG/GIF/MP4 渲染算法 (matplotlib/rasterio/imageio) 未移植: 写占位说明, 不产出媒体文件
+            // PNG/GIF/MP4 渲染算法 (matplotlib/rasterio/imageio) 未移植: 写占位说明, 不产出媒体文件。
+            // 不再"假成功"置 Completed (无媒体成果会误导前端), 改显式 Failed。
             nlohmann::json placeholder;
             placeholder["task_type"] = taskType;
             placeholder["status"] = "not_implemented";
-            placeholder["note"] = "动态图渲染待移植, 任务已登记, 未生成媒体文件";
+            placeholder["note"] = "动态图渲染待移植, 未生成媒体文件";
             std::ofstream out((std::filesystem::path(outputDir) / (taskType + ".json")).string());
             out << placeholder.dump(2);
 
             taskDao_->updateResult(taskId, outputDir);
-            taskDao_->updateStatus(taskId, models::TaskStatus::Completed, 100.0);
-            utils::Logger::info("Dynamic: {} task {} done (placeholder), out={}", taskType, taskId, outputDir);
+            taskDao_->updateStatusAndMessage(taskId, models::TaskStatus::Failed, 10.0,
+                                             taskType + ": 动态图渲染未移植 (C++ 后端未实现), 无媒体成果");
+            utils::Logger::warn("Dynamic: {} task {} marked failed (not implemented)", taskType, taskId);
         }
         catch (const std::exception& e)
         {

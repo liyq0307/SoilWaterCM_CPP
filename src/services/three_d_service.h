@@ -46,6 +46,26 @@ namespace soilwatercm::services
         double max_distance;         ///< 最大视距
     };
 
+    /** @brief 淹没分析统计 (随 analyzeInundation 可选回填) */
+    struct InundationStats
+    {
+        double total_area_m2 = 0.0;      ///< 分析区总面积
+        double inundated_area_m2 = 0.0;  ///< 被淹没面积
+        double depth_mean_m = 0.0;       ///< 淹没区平均水深
+        double depth_max_m = 0.0;        ///< 最大水深
+        std::string mask_path;           ///< 淹没掩膜栅格路径
+        std::string depth_path;          ///< 水深栅格路径
+    };
+
+    /** @brief 视域分析统计 (随 analyzeViewshed 可选回填) */
+    struct ViewshedStats
+    {
+        double total_area_m2 = 0.0;   ///< 分析区总面积
+        double visible_area_m2 = 0.0; ///< 可视面积
+        double visible_ratio = 0.0;   ///< 可视比例
+        std::string mask_path;        ///< 视域掩膜栅格路径
+    };
+
     /**
      * @brief 三维分析服务
      *
@@ -92,18 +112,20 @@ namespace soilwatercm::services
          * DEM 低于水位的像元判为淹没, 输出淹没掩膜与水深两张栅格
          * (输入路径 + _inundation.tif / _depth.tif)。
          * @param params 分析入参
+         * @param stats 可选, 非空则回填淹没/水深统计与栅格路径
          * @return 淹没掩膜路径
          */
-        std::string analyzeInundation(const InundationParams& params);
+        std::string analyzeInundation(const InundationParams& params, InundationStats* stats = nullptr);
 
         /**
          * @brief 视域分析
          *
          * 逐像元沿视线做剖面通视判断 (仰角比较), 输出 0/1 视域栅格。
          * @param params 分析入参
+         * @param stats 可选, 非空则回填可视面积统计与栅格路径
          * @return 视域栅格路径
          */
-        std::string analyzeViewshed(const ViewshedParams& params);
+        std::string analyzeViewshed(const ViewshedParams& params, ViewshedStats* stats = nullptr);
 
     private:
         std::shared_ptr<infrastructure::gdal::GdalWrapper> gdal_;

@@ -346,6 +346,53 @@ namespace soilwatercm::controllers
         }
     }
 
+    void ImageController::serve3DTiles(const drogon::HttpRequestPtr& /*req*/,
+                                        std::function<void(const drogon::HttpResponsePtr&)>&& callback, int imageId,
+                                        const std::string& tilePath)
+    {
+        try
+        {
+            auto imageOpt = imageService_->getImageById(imageId);
+            if (!imageOpt)
+            {
+                callback(errorResp("3D Tiles 数据集不存在", drogon::k404NotFound));
+                return;
+            }
+
+            const auto& img = *imageOpt;
+            // 仅 Uav (斜摄影/3DTiles) 且登记指向 tileset.json 的记录可代理
+            if (img.type != models::ImageType::Uav)
+            {
+                callback(errorResp("3D Tiles 数据集不存在", drogon::k404NotFound));
+                return;
+            }
+
+            std::error_code ec;
+            std::filesystem::path tileset = img.file_path;
+            if (std::filesystem::is_directory(tileset, ec))
+                tileset = tileset / "tileset.json";
+            std::filesystem::path root = tileset.parent_path().lexically_normal();
+
+            // lexically_normal 消除 .. 段而不触盘; lexically_relative 判越界 (跨平台)
+            std::filesystem::path target = (root / tilePath).lexically_normal();
+            std::filesystem::path rel = target.lexically_relative(root);
+            bool inside = !rel.empty() && rel.is_relative() && rel.string().rfind("..", 0) != 0;
+            if (!inside || !std::filesystem::is_regular_file(target, ec))
+            {
+                callback(errorResp("文件不存在", drogon::k404NotFound));
+                return;
+            }
+
+            auto resp = drogon::HttpResponse::newFileResponse(target.string());
+            resp->setStatusCode(drogon::k200OK);
+            callback(resp);
+        }
+        catch (const std::exception& e)
+        {
+            callback(errorResp(e.what(), drogon::k404NotFound));
+        }
+    }
+
     void ImageController::chunkInit(const drogon::HttpRequestPtr& req,
                                     std::function<void(const drogon::HttpResponsePtr&)>&& callback)
     {

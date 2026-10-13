@@ -6,6 +6,9 @@
 #include <vector>
 
 #include "../dao/anomaly_dao.h"
+#include "../dao/erosion_result_dao.h"
+#include "../dao/disturbance_dao.h"
+#include "../dao/terrain_result_dao.h"
 #include "../models/anomaly.h"
 #include "../models/disturbance.h"
 #include "../utils/logger.h"
@@ -32,17 +35,28 @@ namespace soilwatercm::services
     {
     public:
         /**
-         * @brief 构造, 注入异常 DAO
+         * @brief 构造, 注入异常 DAO 与 (可选) 各检测源 DAO
          * @param anomalyDao 异常 DAO
+         * @param disturbanceDao 扰动 DAO (违规扰动检测数据源), 可为空
+         * @param terrainDao 地形成果 DAO (InSAR 形变栅格来源), 可为空
+         * @param erosionDao 侵蚀成果 DAO (剧烈侵蚀检测数据源), 可为空
          */
-        explicit AnomalyService(std::shared_ptr<dao::AnomalyDao> anomalyDao);
+        AnomalyService(std::shared_ptr<dao::AnomalyDao> anomalyDao,
+                       std::shared_ptr<dao::DisturbanceDao> disturbanceDao = nullptr,
+                       std::shared_ptr<dao::TerrainResultDao> terrainDao = nullptr,
+                       std::shared_ptr<dao::ErosionResultDao> erosionDao = nullptr);
 
         ~AnomalyService() = default;
 
         /**
-         * @brief 按类型检测异常
+         * @brief 按类型检测异常并入库
+         *
+         * disturbance: 取该期次违规 (Illegal) 扰动图斑生成异常;
+         * deformation:  取该项目最新 InSAR 形变栅格做形变异常检测;
+         * erosion:      取该期次侵蚀成果, 剧烈/极强烈面积超阈值则生成一条异常。
+         * 对应数据源 DAO 未注入时记日志并返回空列表 (不阻塞其他类型)。
          * @param params 检测入参
-         * @return 异常列表; 当前为占位实现, 只按项目查已有记录, 未做实际检测
+         * @return 本次新检测生成 (已入库) 的异常列表
          */
         std::vector<models::Anomaly> detectAnomalies(const AnomalyDetectParams& params);
 
@@ -162,6 +176,9 @@ namespace soilwatercm::services
 
     private:
         std::shared_ptr<dao::AnomalyDao> anomalyDao_;
+        std::shared_ptr<dao::DisturbanceDao> disturbanceDao_;
+        std::shared_ptr<dao::TerrainResultDao> terrainDao_;
+        std::shared_ptr<dao::ErosionResultDao> erosionDao_;
     };
 
 }  // namespace soilwatercm::services
