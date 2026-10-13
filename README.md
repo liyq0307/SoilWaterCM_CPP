@@ -393,6 +393,5 @@ ctest -C RelWithDebInfo --output-on-failure
 | [docs/architecture.md](docs/architecture.md) | 架构设计说明 |
 | [docs/deployment.md](docs/deployment.md) | 部署指南 |
 | [docs/user_manual.md](docs/user_manual.md) | 使用手册 |
-| [CLAUDE.md](CLAUDE.md) | 代码协作规则 (注释/提交规范) |
 
 实施依据: SL/T 277-2024《水土保持监测技术规范》
